@@ -3,13 +3,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from html import escape
 from pathlib import Path
 
 from telethon import TelegramClient
 from telethon.errors import PhoneCodeExpiredError, PhoneCodeInvalidError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 
-from seedr_tg.db.models import TelegramLoginState, TelegramUserSession
+from seedr_tg.db.models import (
+    CaptionParseMode,
+    TelegramLoginState,
+    TelegramUserSession,
+    UploadMediaType,
+    UploadSettings,
+)
 from seedr_tg.db.repository import JobRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -136,6 +143,8 @@ class TelegramUploader:
         file_paths: list[Path],
         *,
         caption_prefix: str,
+        job_id: int | None = None,
+        upload_settings: UploadSettings | None = None,
         progress_hook: Callable[[int, int, str], Awaitable[None]] | None = None,
     ) -> None:
         client = await self._get_client()
@@ -157,14 +166,77 @@ class TelegramUploader:
                         )
                     )
 
-            await client.send_file(
-                entity=self._target_chat_id,
-                file=str(file_path),
-                caption=f"{caption_prefix}\n{file_path.name}",
-                supports_streaming=True,
-                progress_callback=on_progress,
+            caption, parse_mode = self._render_caption(
+                file_path=file_path,
+                caption_prefix=caption_prefix,
+                job_id=job_id,
+                upload_settings=upload_settings,
             )
+            thumb_path = self._resolve_thumbnail_path(upload_settings)
+            kwargs = {
+                "entity": self._target_chat_id,
+                "file": str(file_path),
+                "caption": caption,
+                "supports_streaming": True,
+                "progress_callback": on_progress,
+            }
+            if parse_mode is not None:
+                kwargs["parse_mode"] = parse_mode
+            if upload_settings and upload_settings.media_type == UploadMediaType.DOCUMENT:
+                kwargs["force_document"] = True
+            if thumb_path is not None:
+                kwargs["thumb"] = str(thumb_path)
+            await client.send_file(**kwargs)
             LOGGER.info("Uploaded %s to Telegram", file_path)
+
+    @staticmethod
+    def _resolve_thumbnail_path(upload_settings: UploadSettings | None) -> Path | None:
+        if upload_settings is None or not upload_settings.thumbnail_local_path:
+            return None
+        path = Path(upload_settings.thumbnail_local_path)
+        if not path.exists():
+            LOGGER.warning("Configured thumbnail not found at %s; sending without thumbnail", path)
+            return None
+        return path
+
+    @staticmethod
+    def _render_caption(
+        *,
+        file_path: Path,
+        caption_prefix: str,
+        job_id: int | None,
+        upload_settings: UploadSettings | None,
+    ) -> tuple[str, str | None]:
+        filename = file_path.name
+        if upload_settings is None or not upload_settings.caption_template:
+            return f"{caption_prefix}\n{filename}", None
+        template = upload_settings.caption_template
+        include_filename_prefix = "{filename}" not in template
+        template_filename = filename
+        template_torrent_name = caption_prefix
+        if upload_settings.caption_parse_mode == CaptionParseMode.HTML:
+            template_filename = escape(filename)
+            template_torrent_name = escape(caption_prefix)
+        try:
+            rendered = template.format(
+                filename=template_filename,
+                torrent_name=template_torrent_name,
+                job_id=job_id if job_id is not None else "",
+            )
+        except (KeyError, ValueError) as exc:
+            LOGGER.warning("Invalid caption template, using fallback caption: %s", exc)
+            return f"{caption_prefix}\n{filename}", None
+        parse_mode = "html"
+        if upload_settings.caption_parse_mode == CaptionParseMode.MARKDOWN_V2:
+            parse_mode = "md"
+        if upload_settings.caption_parse_mode == CaptionParseMode.HTML:
+            if include_filename_prefix:
+                safe_filename = escape(filename)
+                return f"{safe_filename}\n{rendered}", parse_mode
+            return rendered, parse_mode
+        if include_filename_prefix:
+            return f"{filename}\n{rendered}", parse_mode
+        return rendered, parse_mode
 
     async def _get_client(self) -> TelegramClient:
         if self._client is not None and self._client.is_connected():

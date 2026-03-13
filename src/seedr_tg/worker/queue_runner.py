@@ -167,6 +167,8 @@ class QueueRunner:
         await self._uploader.upload_files(
             file_paths,
             caption_prefix=snapshot.title or f"Job {job.id}",
+            job_id=job.id,
+            upload_settings=await self._repository.get_upload_settings(),
             progress_hook=lambda index, total_files, detail: self._track_upload_progress(
                 job_id,
                 index,

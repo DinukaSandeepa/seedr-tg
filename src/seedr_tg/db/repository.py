@@ -8,16 +8,20 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ASCENDING, ReturnDocument
 
 from seedr_tg.db.models import (
+    CaptionParseMode,
     FINAL_PHASES,
     JobPhase,
     JobRecord,
     SeedrDeviceCodeRecord,
     TelegramLoginState,
     TelegramUserSession,
+    UploadMediaType,
+    UploadSettings,
     utc_now,
 )
 
 FINAL_PHASE_VALUES = [phase.value for phase in FINAL_PHASES]
+_UNSET = object()
 
 
 def _serialize_job_updates(updates: dict[str, Any]) -> dict[str, Any]:
@@ -276,6 +280,75 @@ class JobRepository:
         row.pop("_id", None)
         return TelegramUserSession(**row)
 
+    async def get_upload_settings(self) -> UploadSettings:
+        row = await self._state.find_one({"_id": "upload_settings"})
+        if row is None:
+            now = utc_now()
+            return UploadSettings(
+                media_type=UploadMediaType.MEDIA,
+                caption_template=None,
+                caption_parse_mode=CaptionParseMode.HTML,
+                thumbnail_file_id=None,
+                thumbnail_local_path=None,
+                created_at=now,
+                updated_at=now,
+            )
+        return self._to_upload_settings(row)
+
+    async def update_upload_settings(
+        self,
+        *,
+        media_type: UploadMediaType | str | object = _UNSET,
+        caption_template: str | None | object = _UNSET,
+        caption_parse_mode: CaptionParseMode | str | object = _UNSET,
+        thumbnail_file_id: str | None | object = _UNSET,
+        thumbnail_local_path: str | None | object = _UNSET,
+    ) -> UploadSettings:
+        async with self._write_lock:
+            existing_row = await self._state.find_one({"_id": "upload_settings"})
+            if existing_row is None:
+                current = await self.get_upload_settings()
+            else:
+                current = self._to_upload_settings(existing_row)
+
+            new_media_type = current.media_type if media_type is _UNSET else UploadMediaType(str(media_type))
+            new_caption_template = current.caption_template if caption_template is _UNSET else caption_template
+            new_caption_parse_mode = (
+                current.caption_parse_mode
+                if caption_parse_mode is _UNSET
+                else CaptionParseMode(str(caption_parse_mode))
+            )
+            new_thumbnail_file_id = (
+                current.thumbnail_file_id if thumbnail_file_id is _UNSET else thumbnail_file_id
+            )
+            new_thumbnail_local_path = (
+                current.thumbnail_local_path
+                if thumbnail_local_path is _UNSET
+                else thumbnail_local_path
+            )
+
+            updated = UploadSettings(
+                media_type=new_media_type,
+                caption_template=new_caption_template,
+                caption_parse_mode=new_caption_parse_mode,
+                thumbnail_file_id=new_thumbnail_file_id,
+                thumbnail_local_path=new_thumbnail_local_path,
+                created_at=current.created_at,
+                updated_at=utc_now(),
+            )
+
+            await self._state.replace_one(
+                {"_id": "upload_settings"},
+                {"_id": "upload_settings", **self._serialize_upload_settings(updated)},
+                upsert=True,
+            )
+            return updated
+
+    async def reset_upload_settings(self) -> UploadSettings:
+        async with self._write_lock:
+            await self._state.delete_one({"_id": "upload_settings"})
+        return await self.get_upload_settings()
+
     @staticmethod
     def _to_record(row: dict[str, Any]) -> JobRecord:
         values = {field.name: row.get(field.name) for field in fields(JobRecord)}
@@ -283,3 +356,31 @@ class JobRepository:
         values["phase"] = JobPhase(values["phase"])
         values["cancel_requested"] = bool(values["cancel_requested"])
         return JobRecord(**values)
+
+    @staticmethod
+    def _to_upload_settings(row: dict[str, Any]) -> UploadSettings:
+        created_at = row.get("created_at") or utc_now()
+        updated_at = row.get("updated_at") or created_at
+        return UploadSettings(
+            media_type=UploadMediaType(row.get("media_type", UploadMediaType.MEDIA.value)),
+            caption_template=row.get("caption_template"),
+            caption_parse_mode=CaptionParseMode(
+                row.get("caption_parse_mode", CaptionParseMode.HTML.value)
+            ),
+            thumbnail_file_id=row.get("thumbnail_file_id"),
+            thumbnail_local_path=row.get("thumbnail_local_path"),
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _serialize_upload_settings(settings: UploadSettings) -> dict[str, Any]:
+        return {
+            "media_type": settings.media_type.value,
+            "caption_template": settings.caption_template,
+            "caption_parse_mode": settings.caption_parse_mode.value,
+            "thumbnail_file_id": settings.thumbnail_file_id,
+            "thumbnail_local_path": settings.thumbnail_local_path,
+            "created_at": settings.created_at,
+            "updated_at": settings.updated_at,
+        }

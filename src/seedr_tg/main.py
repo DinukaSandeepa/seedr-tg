@@ -5,6 +5,7 @@ import contextlib
 import signal
 
 from seedr_tg.config import load_settings
+from seedr_tg.db.models import CaptionParseMode, UploadMediaType
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.logging import configure_logging
 from seedr_tg.seedr.client import SeedrService
@@ -64,6 +65,20 @@ async def run() -> None:
     async def submit_user_session_password_callback(password: str):
         return await uploader.complete_login_with_password(password)
 
+    async def get_upload_settings_callback():
+        return await repository.get_upload_settings()
+
+    async def update_upload_settings_callback(**updates):
+        normalized = dict(updates)
+        if "media_type" in normalized and normalized["media_type"] is not None:
+            normalized["media_type"] = UploadMediaType(str(normalized["media_type"]))
+        if "caption_parse_mode" in normalized and normalized["caption_parse_mode"] is not None:
+            normalized["caption_parse_mode"] = CaptionParseMode(str(normalized["caption_parse_mode"]))
+        return await repository.update_upload_settings(**normalized)
+
+    async def reset_upload_settings_callback():
+        return await repository.reset_upload_settings()
+
     bot_app = TelegramBotApp(
         token=settings.telegram_bot_token,
         source_chat_id=settings.telegram_source_chat_id,
@@ -77,6 +92,9 @@ async def run() -> None:
         start_user_session_callback=start_user_session_callback,
         submit_user_session_code_callback=submit_user_session_code_callback,
         submit_user_session_password_callback=submit_user_session_password_callback,
+        get_upload_settings_callback=get_upload_settings_callback,
+        update_upload_settings_callback=update_upload_settings_callback,
+        reset_upload_settings_callback=reset_upload_settings_callback,
     )
     queue_runner = QueueRunner(
         settings=settings,

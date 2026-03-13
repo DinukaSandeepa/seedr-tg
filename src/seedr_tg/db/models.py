@@ -22,6 +22,16 @@ class JobPhase(StrEnum):
     CANCELED = "canceled"
 
 
+class UploadMediaType(StrEnum):
+    MEDIA = "media"
+    DOCUMENT = "document"
+
+
+class CaptionParseMode(StrEnum):
+    HTML = "html"
+    MARKDOWN_V2 = "markdownv2"
+
+
 FINAL_PHASES = {JobPhase.COMPLETED, JobPhase.FAILED, JobPhase.CANCELED}
 
 
@@ -78,5 +88,16 @@ class TelegramUserSession:
     user_id: int | None
     username: str | None
     display_name: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class UploadSettings:
+    media_type: UploadMediaType
+    caption_template: str | None
+    caption_parse_mode: CaptionParseMode
+    thumbnail_file_id: str | None
+    thumbnail_local_path: str | None
     created_at: str
     updated_at: str
