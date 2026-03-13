@@ -111,14 +111,30 @@ class SeedrService:
 
     async def fetch_remote_files(self, folder_id: int | None = None) -> list[RemoteFile]:
         client = await self._get_client()
-        if folder_id is None:
-            contents = await client.list_contents()
-        else:
-            contents = await client.list_contents(folder_id=str(folder_id))
         remote_files: list[RemoteFile] = []
-        for item in contents.files:
-            result = await client.fetch_file(str(item.folder_file_id))
-            remote_files.append(RemoteFile(name=item.name, size=item.size, download_url=result.url))
+        visited: set[str] = set()
+
+        async def walk(current_folder_id: int | None) -> None:
+            folder_key = "root" if current_folder_id is None else str(current_folder_id)
+            if folder_key in visited:
+                return
+            visited.add(folder_key)
+
+            if current_folder_id is None:
+                contents = await client.list_contents()
+            else:
+                contents = await client.list_contents(folder_id=str(current_folder_id))
+
+            for item in contents.files:
+                result = await client.fetch_file(str(item.folder_file_id))
+                remote_files.append(
+                    RemoteFile(name=item.name, size=item.size, download_url=result.url)
+                )
+
+            for child_folder in contents.folders:
+                await walk(int(child_folder.id))
+
+        await walk(folder_id)
         return remote_files
 
     async def delete_torrent(self, torrent_id: int | None) -> None:

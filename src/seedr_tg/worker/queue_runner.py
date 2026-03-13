@@ -260,13 +260,29 @@ class QueueRunner:
 
     async def _fetch_remote_files_with_retry(self, folder_id: int | None):
         # Seedr can report completion slightly before folder/file listings fully propagate.
-        max_attempts = 4
+        max_attempts = 10
+        retry_delay_seconds = 3
         for attempt in range(1, max_attempts + 1):
             files = await self._seedr_service.fetch_remote_files(folder_id)
             if files:
                 return files
+            if folder_id is not None:
+                root_files = await self._seedr_service.fetch_remote_files(None)
+                if root_files:
+                    LOGGER.info(
+                        "Recovered downloadable files from Seedr root on attempt %s for folder_id=%s",
+                        attempt,
+                        folder_id,
+                    )
+                    return root_files
             if attempt < max_attempts:
-                await asyncio.sleep(2)
+                LOGGER.info(
+                    "Seedr completed but files not visible yet (attempt %s/%s). Retrying in %ss",
+                    attempt,
+                    max_attempts,
+                    retry_delay_seconds,
+                )
+                await asyncio.sleep(retry_delay_seconds)
         return []
 
     async def _check_cancellation(self, job_id: int) -> None:
