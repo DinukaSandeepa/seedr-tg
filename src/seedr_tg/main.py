@@ -17,18 +17,18 @@ async def run() -> None:
     settings = load_settings()
     configure_logging(settings.log_level)
 
-    repository = JobRepository(settings.database_path)
+    repository = JobRepository(settings.mongodb_uri, settings.mongodb_database)
     await repository.initialize()
 
-    seedr_service = SeedrService(settings)
+    seedr_service = SeedrService(settings, repository)
     await seedr_service.start()
 
     uploader = TelegramUploader(
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
-        phone_number=settings.telegram_phone_number,
-        session_name=settings.telegram_session_name,
         target_chat_id=settings.telegram_target_chat_id,
+        repository=repository,
+        bootstrap_session_string=settings.telegram_user_session_string,
     )
     await uploader.start()
 
@@ -49,6 +49,21 @@ async def run() -> None:
     async def set_admin_message_id_callback(job_id: int, admin_message_id: int):
         return await repository.update_job(job_id, admin_message_id=admin_message_id)
 
+    async def start_seedr_auth_callback():
+        return await seedr_service.begin_device_authorization()
+
+    async def complete_seedr_auth_callback():
+        return await seedr_service.complete_device_authorization()
+
+    async def start_user_session_callback(phone_number: str):
+        return await uploader.begin_login(phone_number)
+
+    async def submit_user_session_code_callback(code: str):
+        return await uploader.complete_login_with_code(code)
+
+    async def submit_user_session_password_callback(password: str):
+        return await uploader.complete_login_with_password(password)
+
     bot_app = TelegramBotApp(
         token=settings.telegram_bot_token,
         source_chat_id=settings.telegram_source_chat_id,
@@ -57,6 +72,11 @@ async def run() -> None:
         list_jobs_callback=list_jobs_callback,
         cancel_callback=cancel_callback,
         set_admin_message_id_callback=set_admin_message_id_callback,
+        start_seedr_auth_callback=start_seedr_auth_callback,
+        complete_seedr_auth_callback=complete_seedr_auth_callback,
+        start_user_session_callback=start_user_session_callback,
+        submit_user_session_code_callback=submit_user_session_code_callback,
+        submit_user_session_password_callback=submit_user_session_password_callback,
     )
     queue_runner = QueueRunner(
         settings=settings,
@@ -87,6 +107,7 @@ async def run() -> None:
         await bot_app.stop()
         await uploader.stop()
         await seedr_service.stop()
+        await repository.close()
 
 
 def main() -> None:

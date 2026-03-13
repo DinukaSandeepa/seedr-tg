@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -16,7 +17,13 @@ from telegram.ext import (
     filters,
 )
 
-from seedr_tg.db.models import JobRecord
+from seedr_tg.db.models import (
+    JobRecord,
+    SeedrDeviceCodeRecord,
+    TelegramLoginState,
+    TelegramUserSession,
+)
+from seedr_tg.telegram.uploader import TelegramPasswordRequiredError
 from seedr_tg.worker.progress import format_job_status
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +41,11 @@ class TelegramBotApp:
         list_jobs_callback: Callable[[], Awaitable[list[JobRecord]]],
         cancel_callback: Callable[[int], Awaitable[JobRecord]],
         set_admin_message_id_callback: Callable[[int, int], Awaitable[JobRecord]],
+        start_seedr_auth_callback: Callable[[], Awaitable[SeedrDeviceCodeRecord]],
+        complete_seedr_auth_callback: Callable[[], Awaitable[str]],
+        start_user_session_callback: Callable[[str], Awaitable[TelegramLoginState]],
+        submit_user_session_code_callback: Callable[[str], Awaitable[TelegramUserSession]],
+        submit_user_session_password_callback: Callable[[str], Awaitable[TelegramUserSession]],
     ) -> None:
         self._source_chat_id = source_chat_id
         self._admin_chat_id = admin_chat_id
@@ -41,8 +53,18 @@ class TelegramBotApp:
         self._list_jobs_callback = list_jobs_callback
         self._cancel_callback = cancel_callback
         self._set_admin_message_id_callback = set_admin_message_id_callback
+        self._start_seedr_auth_callback = start_seedr_auth_callback
+        self._complete_seedr_auth_callback = complete_seedr_auth_callback
+        self._start_user_session_callback = start_user_session_callback
+        self._submit_user_session_code_callback = submit_user_session_code_callback
+        self._submit_user_session_password_callback = submit_user_session_password_callback
         self._application = Application.builder().token(token).build()
         self._application.add_handler(CommandHandler("status", self._status))
+        self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
+        self._application.add_handler(CommandHandler("seedr_auth_done", self._seedr_auth_done))
+        self._application.add_handler(CommandHandler("session_start", self._session_start))
+        self._application.add_handler(CommandHandler("session_code", self._session_code))
+        self._application.add_handler(CommandHandler("session_password", self._session_password))
         self._application.add_handler(
             CallbackQueryHandler(self._handle_cancel, pattern=r"^cancel:\d+$")
         )
@@ -117,12 +139,78 @@ class TelegramBotApp:
 
     async def _status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
+        if not await self._ensure_admin(update):
+            return
         jobs = await self._list_jobs_callback()
         if not jobs:
             await update.effective_message.reply_text("Queue is empty.")
             return
         payload = "\n\n".join(format_job_status(job) for job in jobs[:5])
         await update.effective_message.reply_text(payload, parse_mode=ParseMode.HTML)
+
+    async def _seedr_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._ensure_admin(update):
+            return
+        state = await self._start_seedr_auth_callback()
+        await update.effective_message.reply_text(
+            text=(
+                "<b>Authorize Seedr</b>\n"
+                f"Open: {escape(state.verification_url)}\n"
+                f"Code: <code>{escape(state.user_code)}</code>\n"
+                "After approving the device, run /seedr_auth_done"
+            ),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+    async def _seedr_auth_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._ensure_admin(update):
+            return
+        account_name = await self._complete_seedr_auth_callback()
+        await update.effective_message.reply_text(
+            f"Seedr authenticated as {account_name}.",
+            disable_web_page_preview=True,
+        )
+
+    async def _session_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._ensure_admin(update):
+            return
+        if not context.args:
+            await update.effective_message.reply_text("Usage: /session_start <phone_number>")
+            return
+        state = await self._start_user_session_callback(context.args[0])
+        await update.effective_message.reply_text(
+            text=(
+                "Login code sent.\n"
+                f"Phone: {escape(state.phone_number)}\n"
+                "Reply with /session_code <code>."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def _session_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._ensure_admin(update):
+            return
+        if not context.args:
+            await update.effective_message.reply_text("Usage: /session_code <code>")
+            return
+        try:
+            session = await self._submit_user_session_code_callback(context.args[0])
+        except TelegramPasswordRequiredError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        await update.effective_message.reply_text(self._format_session_success(session))
+
+    async def _session_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._ensure_admin(update):
+            return
+        if not context.args:
+            await update.effective_message.reply_text("Usage: /session_password <password>")
+            return
+        session = await self._submit_user_session_password_callback(" ".join(context.args))
+        await update.effective_message.reply_text(self._format_session_success(session))
 
     async def _handle_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -142,3 +230,22 @@ class TelegramBotApp:
     def _extract_magnet(text: str) -> str | None:
         match = MAGNET_PATTERN.search(text)
         return match.group(0) if match else None
+
+    async def _ensure_admin(self, update: Update) -> bool:
+        chat = update.effective_chat
+        message = update.effective_message
+        if chat is None or message is None:
+            return False
+        if chat.id == self._admin_chat_id:
+            return True
+        await message.reply_text("This command is only available in the configured admin chat.")
+        return False
+
+    @staticmethod
+    def _format_session_success(session: TelegramUserSession) -> str:
+        identity = (
+            session.display_name
+            or session.username
+            or str(session.user_id or "unknown user")
+        )
+        return f"Telegram user session saved for {identity}."

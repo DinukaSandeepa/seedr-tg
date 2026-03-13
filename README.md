@@ -19,24 +19,25 @@ Copy `.env.example` to `.env` and fill these values:
 
 - `TELEGRAM_BOT_TOKEN`: Bot token used for intake and admin messaging.
 - `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`: Telegram API credentials for the premium uploader account.
-- `TELEGRAM_PHONE_NUMBER`: Phone number of the premium Telegram account.
 - `TELEGRAM_SOURCE_CHAT_ID`: Channel or chat that receives the magnet messages.
 - `TELEGRAM_TARGET_CHAT_ID`: Destination where completed files are uploaded.
 - `TELEGRAM_ADMIN_CHAT_ID`: Private admin chat for progress and cancel controls.
-- `SEEDR_TOKEN_JSON`: Preferred Seedr session token JSON.
-- `SEEDR_EMAIL` and `SEEDR_PASSWORD`: Fallback auth if no token JSON is provided.
+- `MONGODB_URI` and `MONGODB_DATABASE`: MongoDB connection for jobs, auth state, and Telegram user session storage.
+- `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
+- `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
 
 ## Run
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip install -r requirements.txt
 seedr-tg
 ```
 
 ## Notes
 
-- The MTProto session is stored locally via Telethon. The first run will require Telegram login confirmation.
+- Use `/session_start <phone>`, `/session_code <code>`, and optionally `/session_password <password>` in the admin chat to create the Telegram premium uploader session and store it in MongoDB.
+- Use `/seedr_auth` and `/seedr_auth_done` in the admin chat to complete Seedr device-code authentication and store the refreshed token in MongoDB.
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.

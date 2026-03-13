@@ -11,6 +11,8 @@ from seedrcc import AsyncSeedr, Token
 from seedrcc.models import Folder, Torrent, TorrentProgress
 
 from seedr_tg.config import Settings
+from seedr_tg.db.models import SeedrDeviceCodeRecord
+from seedr_tg.db.repository import JobRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,20 +33,50 @@ class RemoteFile:
 
 
 class SeedrService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, repository: JobRepository) -> None:
         self._settings = settings
+        self._repository = repository
         self._client: AsyncSeedr | None = None
         self._token_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._client is not None:
             return
-        self._client = await self._build_client()
+        token_json = await self._repository.get_seedr_token_json()
+        if token_json is None and self._settings.seedr_token_json:
+            token_json = self._settings.seedr_token_json
+            await self._repository.set_seedr_token_json(token_json)
+        if token_json is not None:
+            self._client = await self._build_client_from_token(token_json)
 
     async def stop(self) -> None:
         if self._client is not None:
             await self._client.close()
             self._client = None
+
+    async def begin_device_authorization(self) -> SeedrDeviceCodeRecord:
+        codes = await AsyncSeedr.get_device_code()
+        return await self._repository.save_seedr_device_code(
+            device_code=codes.device_code,
+            user_code=codes.user_code,
+            verification_url=codes.verification_url,
+            expires_in=getattr(codes, "expires_in", None),
+        )
+
+    async def complete_device_authorization(self) -> str:
+        pending = await self._repository.get_seedr_device_code()
+        if pending is None:
+            raise RuntimeError("No pending Seedr device authorization. Run /seedr_auth first.")
+        client = await AsyncSeedr.from_device_code(
+            pending.device_code,
+            on_token_refresh=self._persist_token,
+        )
+        settings = await client.get_settings()
+        await self._replace_client(client)
+        await self._persist_token(client.token)
+        await self._repository.clear_seedr_device_code()
+        account = getattr(settings.account, "username", None) or "Seedr account"
+        return str(account)
 
     async def add_magnet(self, magnet_link: str) -> int | None:
         client = await self._get_client()
@@ -124,25 +156,28 @@ class SeedrService:
     async def _get_client(self) -> AsyncSeedr:
         if self._client is None:
             await self.start()
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError(
+                "Seedr is not authenticated. "
+                "Use /seedr_auth and /seedr_auth_done in the admin chat."
+            )
         return self._client
 
-    async def _build_client(self) -> AsyncSeedr:
-        if self._settings.seedr_token_json:
-            token = Token.from_json(self._settings.seedr_token_json)
-            return AsyncSeedr(token=token, on_token_refresh=self._persist_token)
-        return await AsyncSeedr.from_password(
-            self._settings.seedr_email or "",
-            self._settings.seedr_password or "",
-            on_token_refresh=self._persist_token,
-        )
+    async def _build_client_from_token(self, token_json: str) -> AsyncSeedr:
+        token = Token.from_json(token_json)
+        return AsyncSeedr(token=token, on_token_refresh=self._persist_token)
+
+    async def _replace_client(self, client: AsyncSeedr) -> None:
+        old_client = self._client
+        self._client = client
+        if old_client is not None:
+            await old_client.close()
 
     async def _persist_token(self, token: Token) -> None:
         async with self._token_lock:
             self._settings.seedr_token_json = token.to_json()
-            token_path = self._settings.database_path.parent / "seedr_token.json"
-            token_path.write_text(token.to_json(), encoding="utf-8")
-            LOGGER.info("Persisted refreshed Seedr token to %s", token_path)
+            await self._repository.set_seedr_token_json(token.to_json())
+            LOGGER.info("Persisted refreshed Seedr token to MongoDB")
 
     @staticmethod
     def _find_torrent(torrents: list[Torrent], torrent_id: int | None) -> Torrent | None:

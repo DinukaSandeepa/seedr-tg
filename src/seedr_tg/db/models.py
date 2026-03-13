@@ -50,3 +50,33 @@ class JobRecord:
     cancel_requested: bool
     created_at: str
     updated_at: str
+
+
+@dataclass(slots=True)
+class SeedrDeviceCodeRecord:
+    device_code: str
+    user_code: str
+    verification_url: str
+    expires_in: int | None
+    created_at: str
+
+
+@dataclass(slots=True)
+class TelegramLoginState:
+    phone_number: str
+    phone_code_hash: str
+    session_string: str
+    password_required: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class TelegramUserSession:
+    session_string: str
+    phone_number: str | None
+    user_id: int | None
+    username: str | None
+    display_name: str | None
+    created_at: str
+    updated_at: str
