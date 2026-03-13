@@ -88,6 +88,8 @@ class JobRepository:
                     "seedr_folder_id": None,
                     "seedr_folder_name": None,
                     "progress_percent": 0.0,
+                    "download_speed_bps": 0.0,
+                    "upload_speed_bps": 0.0,
                     "current_step": None,
                     "local_path": None,
                     "upload_file_count": 0,
@@ -355,6 +357,8 @@ class JobRepository:
         values["id"] = row["_id"]
         values["phase"] = JobPhase(values["phase"])
         values["cancel_requested"] = bool(values["cancel_requested"])
+        values["download_speed_bps"] = float(values.get("download_speed_bps") or 0.0)
+        values["upload_speed_bps"] = float(values.get("upload_speed_bps") or 0.0)
         return JobRecord(**values)
 
     @staticmethod

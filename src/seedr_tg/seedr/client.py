@@ -34,6 +34,8 @@ class RemoteFile:
 
 
 class SeedrService:
+    _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+
     def __init__(self, settings: Settings, repository: JobRepository) -> None:
         self._settings = settings
         self._repository = repository
@@ -172,7 +174,7 @@ class SeedrService:
                 downloaded = 0
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("wb") as handle:
-                    async for chunk in response.aiter_bytes(1024 * 1024):
+                    async for chunk in response.aiter_bytes(self._DOWNLOAD_CHUNK_SIZE):
                         handle.write(chunk)
                         downloaded += len(chunk)
                         if progress_hook is not None:

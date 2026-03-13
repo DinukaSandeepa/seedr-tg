@@ -11,6 +11,19 @@ def progress_bar(percent: float, width: int = 12) -> str:
     return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
+def format_speed_bps(speed_bps: float | None) -> str:
+    speed = float(speed_bps or 0.0)
+    if speed <= 0:
+        return "-"
+    units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    value = speed
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    return f"{value:.2f} {units[unit_index]}"
+
+
 def format_job_status(job: JobRecord) -> str:
     name = escape(job.torrent_name or "Pending metadata")
     step = escape(job.current_step or job.phase.value.replace("_", " ").title())
@@ -24,5 +37,7 @@ def format_job_status(job: JobRecord) -> str:
         f"<b>Step:</b> {step}\n"
         f"<b>Size:</b> {size}\n"
         f"<b>Progress:</b> {progress_bar(job.progress_percent)} {job.progress_percent:.1f}%\n"
+        f"<b>Download Speed:</b> {format_speed_bps(job.download_speed_bps)}\n"
+        f"<b>Upload Speed:</b> {format_speed_bps(job.upload_speed_bps)}\n"
         f"<b>Uploads:</b> {job.uploaded_file_count}/{job.upload_file_count}{failure}"
     )

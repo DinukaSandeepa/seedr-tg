@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from html import escape
 from pathlib import Path
@@ -145,11 +146,13 @@ class TelegramUploader:
         caption_prefix: str,
         job_id: int | None = None,
         upload_settings: UploadSettings | None = None,
-        progress_hook: Callable[[int, int, str], Awaitable[None]] | None = None,
+        progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None = None,
     ) -> None:
         client = await self._get_client()
         total_files = len(file_paths)
         for index, file_path in enumerate(file_paths, start=1):
+            last_emit = 0.0
+
             def on_progress(
                 current: int,
                 total: int,
@@ -157,12 +160,19 @@ class TelegramUploader:
                 current_index: int = index,
                 current_name: str = file_path.name,
             ) -> None:
+                nonlocal last_emit
                 if progress_hook is not None:
+                    now = time.monotonic()
+                    if current < total and (now - last_emit) < 1.0:
+                        return
+                    last_emit = now
                     asyncio.create_task(
                         progress_hook(
                             current_index,
                             total_files,
                             f"{current_name} {current}/{total}",
+                            int(current),
+                            int(total),
                         )
                     )
 
@@ -186,6 +196,7 @@ class TelegramUploader:
                 kwargs["force_document"] = True
             if thumb_path is not None:
                 kwargs["thumb"] = str(thumb_path)
+            kwargs["part_size_kb"] = 512
             await client.send_file(**kwargs)
             LOGGER.info("Uploaded %s to Telegram", file_path)
 

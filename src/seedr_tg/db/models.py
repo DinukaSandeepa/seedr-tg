@@ -51,6 +51,8 @@ class JobRecord:
     seedr_folder_id: int | None
     seedr_folder_name: str | None
     progress_percent: float
+    download_speed_bps: float
+    upload_speed_bps: float
     current_step: str | None
     local_path: str | None
     upload_file_count: int

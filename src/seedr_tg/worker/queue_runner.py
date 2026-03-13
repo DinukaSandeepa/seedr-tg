@@ -39,6 +39,7 @@ class QueueRunner:
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
         self._last_progress_sync_at: dict[tuple[int, str], float] = {}
+        self._speed_samples: dict[tuple[int, str], tuple[float, int]] = {}
 
     async def enqueue_magnet(
         self,
@@ -130,6 +131,8 @@ class QueueRunner:
             seedr_folder_id=snapshot.seedr_folder_id,
             seedr_folder_name=snapshot.seedr_folder_name,
             progress_percent=100.0,
+            download_speed_bps=0.0,
+            upload_speed_bps=0.0,
             current_step="Downloading files from Seedr to local disk",
         )
         await self._sync_admin_message(job)
@@ -160,6 +163,8 @@ class QueueRunner:
             local_path=str(local_root),
             upload_file_count=len(file_paths),
             uploaded_file_count=0,
+            download_speed_bps=0.0,
+            upload_speed_bps=0.0,
             current_step="Uploading files to Telegram",
         )
         await self._sync_admin_message(job)
@@ -169,11 +174,13 @@ class QueueRunner:
             caption_prefix=snapshot.title or f"Job {job.id}",
             job_id=job.id,
             upload_settings=await self._repository.get_upload_settings(),
-            progress_hook=lambda index, total_files, detail: self._track_upload_progress(
+            progress_hook=lambda index, total_files, detail, current_bytes, total_bytes: self._track_upload_progress(
                 job_id,
                 index,
                 total_files,
                 detail,
+                current_bytes,
+                total_bytes,
             ),
         )
 
@@ -182,6 +189,8 @@ class QueueRunner:
             phase=JobPhase.CLEANING,
             progress_percent=100.0,
             uploaded_file_count=len(file_paths),
+            download_speed_bps=0.0,
+            upload_speed_bps=0.0,
             current_step="Cleaning local files",
         )
         await self._sync_admin_message(job)
@@ -192,6 +201,8 @@ class QueueRunner:
             phase=JobPhase.COMPLETED,
             current_step="Completed",
             progress_percent=100.0,
+            download_speed_bps=0.0,
+            upload_speed_bps=0.0,
         )
         await self._sync_admin_message(job)
         await self._repository.renumber_queue()
@@ -228,10 +239,12 @@ class QueueRunner:
         step: str,
     ) -> None:
         percent = 0.0 if total == 0 else (current / total) * 100
+        download_speed_bps = self._compute_speed(job_id, "download", current)
         job = await self._transition(
             job_id,
             phase=phase,
             progress_percent=percent,
+            download_speed_bps=download_speed_bps,
             current_step=step,
         )
         if self._should_sync_progress(job_id, phase, percent):
@@ -244,14 +257,23 @@ class QueueRunner:
         current_file_index: int,
         total_files: int,
         detail: str,
+        current_bytes: int,
+        total_bytes: int,
     ) -> None:
         percent = (current_file_index / total_files) * 100 if total_files else 100.0
+        del total_bytes
+        upload_speed_bps = self._compute_speed(
+            job_id,
+            f"upload:{current_file_index}",
+            current_bytes,
+        )
         job = await self._transition(
             job_id,
             phase=JobPhase.UPLOADING_TELEGRAM,
             progress_percent=percent,
             uploaded_file_count=current_file_index - 1,
             upload_file_count=total_files,
+            upload_speed_bps=upload_speed_bps,
             current_step=detail,
         )
         if self._should_sync_progress(job_id, JobPhase.UPLOADING_TELEGRAM, percent):
@@ -360,6 +382,21 @@ class QueueRunner:
             return False
         self._last_progress_sync_at[key] = now
         return True
+
+    def _compute_speed(self, job_id: int, channel: str, current_bytes: int) -> float:
+        key = (job_id, channel)
+        now = time.monotonic()
+        previous = self._speed_samples.get(key)
+        self._speed_samples[key] = (now, int(current_bytes))
+        if previous is None:
+            return 0.0
+        prev_time, prev_bytes = previous
+        if current_bytes < prev_bytes:
+            return 0.0
+        elapsed = now - prev_time
+        if elapsed <= 0:
+            return 0.0
+        return float(current_bytes - prev_bytes) / elapsed
 
     async def _transition(self, job_id: int, **updates) -> JobRecord:
         return await self._repository.update_job(job_id, **updates)
