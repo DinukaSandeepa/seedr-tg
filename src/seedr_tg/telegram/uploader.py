@@ -60,6 +60,9 @@ class TelegramUploader:
         self._repository = repository
         self._bootstrap_session_string = bootstrap_session_string
         self._client: TelegramClient | None = None
+        self._governor_lock = asyncio.Lock()
+        self._adaptive_upload_cap: int | None = None
+        self._stable_upload_streak = 0
 
     async def start(self) -> None:
         if (
@@ -161,10 +164,20 @@ class TelegramUploader:
         upload_max_retries: int = 4,
         upload_retry_base_delay_seconds: float = 1.0,
         upload_retry_max_delay_seconds: float = 30.0,
+        upload_governor_enabled: bool = True,
+        upload_governor_min_concurrency: int = 1,
+        upload_governor_scale_up_after_stable_files: int = 6,
     ) -> None:
         client = await self._get_client()
         total_files = len(file_paths)
-        semaphore = asyncio.Semaphore(max(1, int(max_concurrent_uploads)))
+        requested_upload_concurrency = max(1, int(max_concurrent_uploads))
+        min_upload_concurrency = max(1, int(upload_governor_min_concurrency))
+        effective_upload_concurrency = await self._determine_effective_upload_concurrency(
+            requested_upload_concurrency=requested_upload_concurrency,
+            upload_governor_enabled=upload_governor_enabled,
+            upload_governor_min_concurrency=min_upload_concurrency,
+        )
+        semaphore = asyncio.Semaphore(effective_upload_concurrency)
         progress_lock = asyncio.Lock()
         completed_files = 0
 
@@ -230,13 +243,23 @@ class TelegramUploader:
                 kwargs["thumb"] = str(thumb_path)
 
             async with semaphore:
-                await self._send_file_with_retry(
+                had_flood_wait, retry_count = await self._send_file_with_retry(
                     client,
                     kwargs,
                     upload_max_retries=upload_max_retries,
                     upload_retry_base_delay_seconds=upload_retry_base_delay_seconds,
                     upload_retry_max_delay_seconds=upload_retry_max_delay_seconds,
                 )
+                if upload_governor_enabled:
+                    await self._record_upload_outcome(
+                        requested_upload_concurrency=requested_upload_concurrency,
+                        upload_governor_min_concurrency=min_upload_concurrency,
+                        upload_governor_scale_up_after_stable_files=(
+                            upload_governor_scale_up_after_stable_files
+                        ),
+                        had_flood_wait=had_flood_wait,
+                        retry_count=retry_count,
+                    )
 
             async with progress_lock:
                 completed_files += 1
@@ -262,13 +285,15 @@ class TelegramUploader:
         upload_max_retries: int,
         upload_retry_base_delay_seconds: float,
         upload_retry_max_delay_seconds: float,
-    ) -> None:
+    ) -> tuple[bool, int]:
         max_attempts = max(1, int(upload_max_retries))
+        had_flood_wait = False
         for attempt in range(1, max_attempts + 1):
             try:
                 await client.send_file(**kwargs)
-                return
+                return had_flood_wait, attempt - 1
             except FloodWaitError as exc:
+                had_flood_wait = True
                 wait_seconds = max(1, int(exc.seconds))
                 LOGGER.warning("Telegram flood wait while uploading; sleeping %ss", wait_seconds)
                 await asyncio.sleep(wait_seconds)
@@ -291,6 +316,71 @@ class TelegramUploader:
                     exc,
                 )
                 await asyncio.sleep(delay)
+        return had_flood_wait, max_attempts - 1
+
+    async def _determine_effective_upload_concurrency(
+        self,
+        *,
+        requested_upload_concurrency: int,
+        upload_governor_enabled: bool,
+        upload_governor_min_concurrency: int,
+    ) -> int:
+        if not upload_governor_enabled:
+            return requested_upload_concurrency
+        async with self._governor_lock:
+            if self._adaptive_upload_cap is None:
+                self._adaptive_upload_cap = requested_upload_concurrency
+            self._adaptive_upload_cap = max(
+                upload_governor_min_concurrency,
+                min(self._adaptive_upload_cap, requested_upload_concurrency),
+            )
+            effective = self._adaptive_upload_cap
+        if effective < requested_upload_concurrency:
+            LOGGER.info(
+                "Upload governor limiting concurrency to %s (requested=%s)",
+                effective,
+                requested_upload_concurrency,
+            )
+        return effective
+
+    async def _record_upload_outcome(
+        self,
+        *,
+        requested_upload_concurrency: int,
+        upload_governor_min_concurrency: int,
+        upload_governor_scale_up_after_stable_files: int,
+        had_flood_wait: bool,
+        retry_count: int,
+    ) -> None:
+        async with self._governor_lock:
+            current_cap = self._adaptive_upload_cap or requested_upload_concurrency
+            if had_flood_wait:
+                new_cap = max(upload_governor_min_concurrency, current_cap - 1)
+                self._adaptive_upload_cap = new_cap
+                self._stable_upload_streak = 0
+                if new_cap < current_cap:
+                    LOGGER.warning(
+                        "Upload governor reduced concurrency to %s after flood wait",
+                        new_cap,
+                    )
+                return
+
+            if retry_count > 0:
+                self._stable_upload_streak = 0
+                return
+
+            self._stable_upload_streak += 1
+            stable_target = max(1, int(upload_governor_scale_up_after_stable_files))
+            if (
+                self._stable_upload_streak >= stable_target
+                and current_cap < requested_upload_concurrency
+            ):
+                self._adaptive_upload_cap = current_cap + 1
+                self._stable_upload_streak = 0
+                LOGGER.info(
+                    "Upload governor increased concurrency to %s after stable uploads",
+                    self._adaptive_upload_cap,
+                )
 
     @staticmethod
     def _is_retryable_upload_error(exc: BaseException) -> bool:

@@ -197,6 +197,11 @@ class QueueRunner:
             upload_max_retries=self._settings.upload_max_retries,
             upload_retry_base_delay_seconds=self._settings.upload_retry_base_delay_seconds,
             upload_retry_max_delay_seconds=self._settings.upload_retry_max_delay_seconds,
+            upload_governor_enabled=self._settings.upload_governor_enabled,
+            upload_governor_min_concurrency=self._settings.upload_governor_min_concurrency,
+            upload_governor_scale_up_after_stable_files=(
+                self._settings.upload_governor_scale_up_after_stable_files
+            ),
             progress_hook=upload_progress_hook,
         )
 

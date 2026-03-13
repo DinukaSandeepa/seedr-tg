@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import shutil
@@ -188,10 +189,12 @@ class SeedrService:
     ) -> None:
         if self._settings.use_aria2_downloads:
             try:
-                await self._download_file_via_aria2(url, destination)
-                if progress_hook is not None:
-                    size = destination.stat().st_size if destination.exists() else 0
-                    await progress_hook(size, size)
+                LOGGER.info("Using aria2 downloader for %s", destination.name)
+                await self._download_file_via_aria2(
+                    url,
+                    destination,
+                    progress_hook=progress_hook,
+                )
                 return
             except (RuntimeError, OSError, ValueError) as exc:
                 LOGGER.warning(
@@ -199,6 +202,8 @@ class SeedrService:
                     destination.name,
                     exc,
                 )
+        else:
+            LOGGER.info("Using built-in httpx downloader for %s", destination.name)
 
         client = self._http_client
         if client is None:
@@ -246,13 +251,22 @@ class SeedrService:
                 )
                 await asyncio.sleep(delay)
 
-    async def _download_file_via_aria2(self, url: str, destination: Path) -> None:
+    async def _download_file_via_aria2(
+        self,
+        url: str,
+        destination: Path,
+        progress_hook: Any | None = None,
+    ) -> None:
         aria2_binary = self._settings.aria2_binary.strip() or "aria2c"
         aria2_path = shutil.which(aria2_binary)
         if aria2_path is None:
             raise RuntimeError(f"aria2 binary '{aria2_binary}' is not available in PATH")
 
         destination.parent.mkdir(parents=True, exist_ok=True)
+        total_bytes = await self._probe_remote_size(url)
+        if progress_hook is not None:
+            await progress_hook(0, total_bytes)
+
         cmd = [
             aria2_path,
             "--allow-overwrite=true",
@@ -282,12 +296,63 @@ class SeedrService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+
+        if progress_hook is not None:
+            await self._track_aria2_progress(proc, destination, total_bytes, progress_hook)
+
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="ignore").strip()
             stdout_text = stdout.decode("utf-8", errors="ignore").strip()
             details = stderr_text or stdout_text or "unknown error"
             raise RuntimeError(f"aria2 exited with code {proc.returncode}: {details}")
+
+        if progress_hook is not None:
+            final_size = destination.stat().st_size if destination.exists() else 0
+            await progress_hook(final_size, total_bytes or final_size)
+
+    async def _track_aria2_progress(
+        self,
+        proc: asyncio.subprocess.Process,
+        destination: Path,
+        total_bytes: int,
+        progress_hook: Any,
+    ) -> None:
+        wait_task = asyncio.create_task(proc.wait())
+        last_reported = -1
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(asyncio.shield(wait_task), timeout=1.0)
+                    break
+                except TimeoutError:
+                    current_size = destination.stat().st_size if destination.exists() else 0
+                    if current_size != last_reported:
+                        await progress_hook(current_size, total_bytes)
+                        last_reported = current_size
+        finally:
+            if not wait_task.done():
+                wait_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait_task
+
+    async def _probe_remote_size(self, url: str) -> int:
+        client = self._http_client
+        if client is None:
+            await self.start()
+            client = self._http_client
+        if client is None:
+            return 0
+
+        try:
+            response = await client.head(url)
+            if response.status_code < 400:
+                value = response.headers.get("Content-Length")
+                if value and value.isdigit():
+                    return int(value)
+        except (httpx.HTTPError, ValueError):
+            return 0
+        return 0
 
     @staticmethod
     def _is_retryable_download_error(exc: BaseException) -> bool:

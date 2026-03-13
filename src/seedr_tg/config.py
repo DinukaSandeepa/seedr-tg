@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     download_concurrency: int = Field(default=4, alias="DOWNLOAD_CONCURRENCY")
     upload_concurrency: int = Field(default=2, alias="UPLOAD_CONCURRENCY")
     upload_part_size_kb: int = Field(default=512, alias="UPLOAD_PART_SIZE_KB")
+    upload_governor_enabled: bool = Field(default=True, alias="UPLOAD_GOVERNOR_ENABLED")
+    upload_governor_min_concurrency: int = Field(
+        default=1,
+        alias="UPLOAD_GOVERNOR_MIN_CONCURRENCY",
+    )
+    upload_governor_scale_up_after_stable_files: int = Field(
+        default=6,
+        alias="UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES",
+    )
     use_uvloop: bool = Field(default=True, alias="USE_UVLOOP")
     use_aria2_downloads: bool = Field(default=False, alias="USE_ARIA2_DOWNLOADS")
     aria2_binary: str = Field(default="aria2c", alias="ARIA2_BINARY")
