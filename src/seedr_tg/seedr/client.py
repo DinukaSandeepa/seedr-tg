@@ -23,6 +23,7 @@ class ResolvedTorrent:
     total_size_bytes: int | None
     torrent: Torrent | None
     folder: Folder | None
+    has_files: bool
 
 
 @dataclass(slots=True)
@@ -83,11 +84,11 @@ class SeedrService:
         result = await client.add_torrent(magnet_link=magnet_link)
         return result.user_torrent_id
 
-    async def resolve_torrent(self, torrent_id: int | None) -> ResolvedTorrent:
+    async def resolve_torrent(self, torrent_id: int | None, known_folder_id: int | None = None) -> ResolvedTorrent:
         client = await self._get_client()
         contents = await client.list_contents()
         torrent = self._find_torrent(contents.torrents, torrent_id)
-        folder = self._find_folder(contents.folders, torrent.folder if torrent else None)
+        folder = self._find_folder(contents.folders, (torrent.folder if torrent else None) or known_folder_id)
         total_size_bytes = folder.size if folder else (torrent.size if torrent else None)
         title = folder.name if folder else (torrent.name if torrent else None)
         return ResolvedTorrent(
@@ -95,6 +96,7 @@ class SeedrService:
             total_size_bytes=total_size_bytes,
             torrent=torrent,
             folder=folder,
+            has_files=bool(contents.files),
         )
 
     async def get_torrent_progress(self, progress_url: str | None) -> TorrentProgress | None:
@@ -103,9 +105,12 @@ class SeedrService:
         client = await self._get_client()
         return await client.get_torrent_progress(progress_url)
 
-    async def fetch_remote_files(self, folder_id: int) -> list[RemoteFile]:
+    async def fetch_remote_files(self, folder_id: int | None = None) -> list[RemoteFile]:
         client = await self._get_client()
-        contents = await client.list_contents(folder_id=str(folder_id))
+        if folder_id is None:
+            contents = await client.list_contents()
+        else:
+            contents = await client.list_contents(folder_id=str(folder_id))
         remote_files: list[RemoteFile] = []
         for item in contents.files:
             result = await client.fetch_file(str(item.folder_file_id))

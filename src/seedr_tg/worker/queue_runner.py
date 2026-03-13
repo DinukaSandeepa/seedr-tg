@@ -132,9 +132,7 @@ class QueueRunner:
         )
         await self._sync_admin_message(job)
 
-        if snapshot.seedr_folder_id is None:
-            raise RuntimeError("Seedr did not create a folder for the finished torrent")
-        remote_files = await self._seedr_service.fetch_remote_files(snapshot.seedr_folder_id)
+        remote_files = await self._fetch_remote_files_with_retry(snapshot.seedr_folder_id)
         if not remote_files:
             raise RuntimeError("Seedr finished torrent without downloadable files")
         local_root = self._settings.download_root / f"job_{job.id}"
@@ -150,7 +148,10 @@ class QueueRunner:
             ),
         )
 
-        await self._seedr_service.delete_folder(snapshot.seedr_folder_id)
+        if snapshot.seedr_folder_id is not None:
+            await self._seedr_service.delete_folder(snapshot.seedr_folder_id)
+        else:
+            await self._seedr_service.delete_torrent(torrent_id)
         job = await self._transition(
             job_id,
             phase=JobPhase.UPLOADING_TELEGRAM,
@@ -194,13 +195,15 @@ class QueueRunner:
     async def _wait_for_seedr(self, job_id: int, torrent_id: int | None):
         while True:
             await self._check_cancellation(job_id)
-            snapshot = await self._poller.poll(torrent_id)
+            job = await self._repository.get_job(job_id)
+            known_folder_id = job.seedr_folder_id if job else None
+            snapshot = await self._poller.poll(torrent_id, known_folder_id=known_folder_id)
             job = await self._transition(
                 job_id,
                 phase=JobPhase.DOWNLOADING_SEEDR,
                 torrent_name=snapshot.title,
                 total_size_bytes=snapshot.total_size_bytes,
-                seedr_folder_id=snapshot.seedr_folder_id,
+                seedr_folder_id=snapshot.seedr_folder_id or known_folder_id,
                 seedr_folder_name=snapshot.seedr_folder_name,
                 progress_percent=snapshot.progress_percent,
                 current_step="Seedr downloading torrent",
@@ -248,6 +251,17 @@ class QueueRunner:
         )
         await self._sync_admin_message(job)
         await self._check_cancellation(job_id)
+
+    async def _fetch_remote_files_with_retry(self, folder_id: int | None):
+        # Seedr can report completion slightly before folder/file listings fully propagate.
+        max_attempts = 4
+        for attempt in range(1, max_attempts + 1):
+            files = await self._seedr_service.fetch_remote_files(folder_id)
+            if files:
+                return files
+            if attempt < max_attempts:
+                await asyncio.sleep(2)
+        return []
 
     async def _check_cancellation(self, job_id: int) -> None:
         job = await self._repository.get_job(job_id)

@@ -59,6 +59,7 @@ class TelegramBotApp:
         self._start_user_session_callback = start_user_session_callback
         self._submit_user_session_code_callback = submit_user_session_code_callback
         self._submit_user_session_password_callback = submit_user_session_password_callback
+        self._admin_message_cache: dict[int, tuple[str, int | None]] = {}
         self._application = Application.builder().token(token).build()
         self._application.add_handler(CommandHandler("status", self._status))
         self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
@@ -98,6 +99,7 @@ class TelegramBotApp:
             reply_markup=reply_markup,
             disable_web_page_preview=True,
         )
+        self._admin_message_cache[message.message_id] = (text, job_id)
         return message.message_id
 
     async def update_admin_message(
@@ -106,6 +108,9 @@ class TelegramBotApp:
         text: str,
         job_id: int | None = None,
     ) -> None:
+        cached = self._admin_message_cache.get(message_id)
+        if cached == (text, job_id):
+            return
         reply_markup = None
         if job_id is not None:
             reply_markup = InlineKeyboardMarkup.from_button(
@@ -120,8 +125,10 @@ class TelegramBotApp:
                 reply_markup=reply_markup,
                 disable_web_page_preview=True,
             )
+            self._admin_message_cache[message_id] = (text, job_id)
         except BadRequest as exc:
             if "message is not modified" in str(exc).lower():
+                self._admin_message_cache[message_id] = (text, job_id)
                 LOGGER.debug("Skipped no-op admin message edit for message_id=%s", message_id)
                 return
             raise
