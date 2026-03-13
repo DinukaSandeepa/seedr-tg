@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import aiofiles
 import httpx
 from seedrcc import AsyncSeedr, Token
 from seedrcc.models import Folder, Torrent, TorrentProgress
@@ -173,9 +174,9 @@ class SeedrService:
                 total = int(response.headers.get("Content-Length", 0))
                 downloaded = 0
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                with destination.open("wb") as handle:
+                async with aiofiles.open(destination, "wb") as handle:
                     async for chunk in response.aiter_bytes(self._DOWNLOAD_CHUNK_SIZE):
-                        handle.write(chunk)
+                        await handle.write(chunk)
                         downloaded += len(chunk)
                         if progress_hook is not None:
                             await progress_hook(downloaded, total)
