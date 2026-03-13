@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     upload_concurrency: int = Field(default=2, alias="UPLOAD_CONCURRENCY")
     upload_part_size_kb: int = Field(default=512, alias="UPLOAD_PART_SIZE_KB")
     use_uvloop: bool = Field(default=True, alias="USE_UVLOOP")
+    use_aria2_downloads: bool = Field(default=False, alias="USE_ARIA2_DOWNLOADS")
+    aria2_binary: str = Field(default="aria2c", alias="ARIA2_BINARY")
+    aria2_split: int = Field(default=8, alias="ARIA2_SPLIT")
+    aria2_max_connection_per_server: int = Field(
+        default=4,
+        alias="ARIA2_MAX_CONNECTION_PER_SERVER",
+    )
+    aria2_min_split_size: str = Field(default="8M", alias="ARIA2_MIN_SPLIT_SIZE")
+    aria2_file_allocation: Literal["none", "prealloc", "trunc", "falloc"] = Field(
+        default="none",
+        alias="ARIA2_FILE_ALLOCATION",
+    )
     download_connect_timeout_seconds: float = Field(
         default=10.0,
         alias="DOWNLOAD_CONNECT_TIMEOUT_SECONDS",

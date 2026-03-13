@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -185,6 +186,20 @@ class SeedrService:
         destination: Path,
         progress_hook: Any | None = None,
     ) -> None:
+        if self._settings.use_aria2_downloads:
+            try:
+                await self._download_file_via_aria2(url, destination)
+                if progress_hook is not None:
+                    size = destination.stat().st_size if destination.exists() else 0
+                    await progress_hook(size, size)
+                return
+            except (RuntimeError, OSError, ValueError) as exc:
+                LOGGER.warning(
+                    "aria2 download failed for %s, falling back to httpx downloader: %s",
+                    destination.name,
+                    exc,
+                )
+
         client = self._http_client
         if client is None:
             await self.start()
@@ -230,6 +245,49 @@ class SeedrService:
                     exc,
                 )
                 await asyncio.sleep(delay)
+
+    async def _download_file_via_aria2(self, url: str, destination: Path) -> None:
+        aria2_binary = self._settings.aria2_binary.strip() or "aria2c"
+        aria2_path = shutil.which(aria2_binary)
+        if aria2_path is None:
+            raise RuntimeError(f"aria2 binary '{aria2_binary}' is not available in PATH")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            aria2_path,
+            "--allow-overwrite=true",
+            "--continue=true",
+            "--auto-file-renaming=false",
+            "--summary-interval=0",
+            "--console-log-level=warn",
+            "--download-result=hide",
+            f"--split={max(1, int(self._settings.aria2_split))}",
+            (
+                "--max-connection-per-server="
+                f"{max(1, int(self._settings.aria2_max_connection_per_server))}"
+            ),
+            f"--min-split-size={self._settings.aria2_min_split_size}",
+            f"--file-allocation={self._settings.aria2_file_allocation}",
+            f"--max-tries={max(1, int(self._settings.download_max_retries))}",
+            "--retry-wait=1",
+            f"--timeout={max(5, int(self._settings.download_read_timeout_seconds))}",
+            "--dir",
+            str(destination.parent),
+            "--out",
+            destination.name,
+            url,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="ignore").strip()
+            stdout_text = stdout.decode("utf-8", errors="ignore").strip()
+            details = stderr_text or stdout_text or "unknown error"
+            raise RuntimeError(f"aria2 exited with code {proc.returncode}: {details}")
 
     @staticmethod
     def _is_retryable_download_error(exc: BaseException) -> bool:

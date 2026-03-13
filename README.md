@@ -35,6 +35,7 @@ If `python` is missing (common on fresh servers), use `python3`.
 ```bash
 apt update
 apt install -y python3 python3-venv python3-pip
+apt install -y aria2
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -52,6 +53,8 @@ apt install -y python-is-python3
 ### macOS
 
 ```bash
+brew install aria2
+
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -83,5 +86,7 @@ seedr-tg
 
 - Use `/session_start <phone>`, `/session_code <code>`, and optionally `/session_password <password>` in the admin chat to create the Telegram premium uploader session and store it in MongoDB.
 - Use `/seedr_auth` and `/seedr_auth_done` in the admin chat to complete Seedr device-code authentication and store the refreshed token in MongoDB.
+- Optional high-speed downloader mode: set `USE_ARIA2_DOWNLOADS=true` and keep `aria2c` installed. If aria2 fails for any file, the app automatically falls back to the built-in HTTP downloader.
+- aria2 tuning keys: `ARIA2_SPLIT`, `ARIA2_MAX_CONNECTION_PER_SERVER`, `ARIA2_MIN_SPLIT_SIZE`, and `ARIA2_FILE_ALLOCATION`.
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.
