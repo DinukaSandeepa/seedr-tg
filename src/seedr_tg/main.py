@@ -29,6 +29,7 @@ async def run() -> None:
     uploader = TelegramUploader(
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
+        bot_token=settings.telegram_bot_token,
         target_chat_id=settings.telegram_target_chat_id,
         repository=repository,
         bootstrap_session_string=settings.telegram_user_session_string,
@@ -74,8 +75,13 @@ async def run() -> None:
         normalized = dict(updates)
         if "media_type" in normalized and normalized["media_type"] is not None:
             normalized["media_type"] = UploadMediaType(str(normalized["media_type"]))
-        if "caption_parse_mode" in normalized and normalized["caption_parse_mode"] is not None:
-            normalized["caption_parse_mode"] = CaptionParseMode(str(normalized["caption_parse_mode"]))
+        if (
+            "caption_parse_mode" in normalized
+            and normalized["caption_parse_mode"] is not None
+        ):
+            normalized["caption_parse_mode"] = CaptionParseMode(
+                str(normalized["caption_parse_mode"])
+            )
         return await repository.update_upload_settings(**normalized)
 
     async def reset_upload_settings_callback():

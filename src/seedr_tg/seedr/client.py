@@ -59,6 +59,7 @@ class SeedrService:
         self._http_client: httpx.AsyncClient | None = None
         self._token_lock = asyncio.Lock()
         self._remote_files_cache: dict[str, tuple[float, list[RemoteFile]]] = {}
+        self._aria2_available: bool | None = None
 
     async def start(self) -> None:
         if self._client is not None:
@@ -221,7 +222,7 @@ class SeedrService:
         destination: Path,
         progress_hook: Any | None = None,
     ) -> None:
-        if self._settings.use_aria2_downloads:
+        if self._should_use_aria2():
             try:
                 LOGGER.info("Using aria2 downloader for %s", destination.name)
                 await self._download_file_via_aria2(
@@ -416,6 +417,18 @@ class SeedrService:
         self._client = client
         if old_client is not None:
             await old_client.close()
+
+    def _should_use_aria2(self) -> bool:
+        if not self._settings.use_aria2_downloads:
+            return False
+        if self._aria2_available is None:
+            self._aria2_available = shutil.which(self._ARIA2_BINARY) is not None
+            if not self._aria2_available:
+                LOGGER.warning(
+                    "USE_ARIA2_DOWNLOADS=true but aria2c is not available in PATH; "
+                    "using built-in httpx downloader"
+                )
+        return self._aria2_available
 
     @staticmethod
     def _remote_files_cache_key(folder_id: int | None) -> str:
