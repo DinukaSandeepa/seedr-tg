@@ -15,6 +15,7 @@ from seedr_tg.telegram.bot_app import TelegramBotApp
 from seedr_tg.telegram.uploader import TelegramUploader
 from seedr_tg.worker.downloads import LocalDownloader
 from seedr_tg.worker.progress import format_job_status
+from seedr_tg.worker.task_status import DownloadTaskStatus, UploadTaskStatus
 
 LOGGER = logging.getLogger(__name__)
 _ALLOWED_UPLOAD_EXTENSIONS = {".mp4", ".mkv", ".zip"}
@@ -40,7 +41,8 @@ class QueueRunner:
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
         self._last_progress_sync_at: dict[tuple[int, str], float] = {}
-        self._speed_samples: dict[tuple[int, str], tuple[float, int]] = {}
+        self._download_status: dict[int, DownloadTaskStatus] = {}
+        self._upload_status: dict[int, UploadTaskStatus] = {}
         self._cancel_processed_jobs: set[int] = set()
 
     async def enqueue_magnet(
@@ -142,6 +144,7 @@ class QueueRunner:
         remote_files = await self._fetch_remote_files_with_retry(snapshot.seedr_folder_id)
         if not remote_files:
             raise RuntimeError("Seedr finished torrent without downloadable files")
+        self._download_status[job_id] = DownloadTaskStatus()
         local_root = self._settings.download_root / f"job_{job.id}"
         file_paths = await self._downloader.download_files(
             remote_files,
@@ -159,7 +162,9 @@ class QueueRunner:
             path for path in file_paths if path.suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
         ]
         skipped_file_names = [
-            path.name for path in file_paths if path.suffix.lower() not in _ALLOWED_UPLOAD_EXTENSIONS
+            path.name
+            for path in file_paths
+            if path.suffix.lower() not in _ALLOWED_UPLOAD_EXTENSIONS
         ]
         if skipped_file_names:
             LOGGER.info(
@@ -213,13 +218,6 @@ class QueueRunner:
             max_concurrent_uploads=self._settings.upload_concurrency,
             upload_part_size_kb=self._settings.upload_part_size_kb,
             upload_max_retries=self._settings.upload_max_retries,
-            upload_retry_base_delay_seconds=self._settings.upload_retry_base_delay_seconds,
-            upload_retry_max_delay_seconds=self._settings.upload_retry_max_delay_seconds,
-            upload_governor_enabled=self._settings.upload_governor_enabled,
-            upload_governor_min_concurrency=self._settings.upload_governor_min_concurrency,
-            upload_governor_scale_up_after_stable_files=(
-                self._settings.upload_governor_scale_up_after_stable_files
-            ),
             progress_hook=upload_progress_hook,
         )
 
@@ -267,7 +265,14 @@ class QueueRunner:
                 await self._seedr_service.ensure_under_limit(snapshot.total_size_bytes)
             if snapshot.is_complete:
                 return snapshot
-            await asyncio.sleep(self._settings.poll_interval_seconds)
+            self._wake_event.clear()
+            try:
+                await asyncio.wait_for(
+                    self._wake_event.wait(),
+                    timeout=self._settings.poll_interval_seconds,
+                )
+            except TimeoutError:
+                continue
 
     async def _update_progress(
         self,
@@ -277,8 +282,8 @@ class QueueRunner:
         total: int,
         step: str,
     ) -> None:
-        percent = 0.0 if total == 0 else (current / total) * 100
-        download_speed_bps = self._compute_speed(job_id, "download", current)
+        status = self._download_status.setdefault(job_id, DownloadTaskStatus())
+        percent, download_speed_bps = status.update(current, total)
         job = await self._transition(
             job_id,
             phase=phase,
@@ -299,22 +304,19 @@ class QueueRunner:
         current_bytes: int,
         total_bytes: int,
     ) -> None:
-        file_fraction = 0.0
-        if total_bytes > 0:
-            file_fraction = min(1.0, max(0.0, current_bytes / total_bytes))
-        overall_units = completed_files + file_fraction
-        percent = (overall_units / total_files) * 100 if total_files else 100.0
-        upload_speed_bps = self._compute_speed(
-            job_id,
-            "upload",
-            current_bytes,
+        status = self._upload_status.setdefault(job_id, UploadTaskStatus())
+        percent, upload_speed_bps, uploaded, total = status.update(
+            completed_files=completed_files,
+            total_files=total_files,
+            current_bytes=current_bytes,
+            total_bytes=total_bytes,
         )
         job = await self._transition(
             job_id,
             phase=JobPhase.UPLOADING_TELEGRAM,
             progress_percent=min(percent, 100.0),
-            uploaded_file_count=min(completed_files, total_files),
-            upload_file_count=total_files,
+            uploaded_file_count=uploaded,
+            upload_file_count=total,
             upload_speed_bps=upload_speed_bps,
             current_step=detail,
         )
@@ -334,7 +336,10 @@ class QueueRunner:
                 root_files = await self._seedr_service.fetch_remote_files(None)
                 if root_files:
                     LOGGER.info(
-                        "Recovered downloadable files from Seedr root on attempt %s for folder_id=%s",
+                        (
+                            "Recovered downloadable files from Seedr root "
+                            "on attempt %s for folder_id=%s"
+                        ),
                         attempt,
                         folder_id,
                     )
@@ -385,8 +390,6 @@ class QueueRunner:
             last_error=reason,
             current_step="Failed",
         )
-        self._speed_samples.pop((job_id, "download"), None)
-        self._speed_samples.pop((job_id, "upload"), None)
         await self._sync_admin_message(failed)
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
@@ -431,26 +434,11 @@ class QueueRunner:
         self._last_progress_sync_at[key] = now
         return True
 
-    def _compute_speed(self, job_id: int, channel: str, current_bytes: int) -> float:
-        key = (job_id, channel)
-        now = time.monotonic()
-        previous = self._speed_samples.get(key)
-        self._speed_samples[key] = (now, int(current_bytes))
-        if previous is None:
-            return 0.0
-        prev_time, prev_bytes = previous
-        if current_bytes < prev_bytes:
-            return 0.0
-        elapsed = now - prev_time
-        if elapsed <= 0:
-            return 0.0
-        return float(current_bytes - prev_bytes) / elapsed
-
     async def _transition(self, job_id: int, **updates) -> JobRecord:
         job = await self._repository.update_job(job_id, **updates)
         if job.phase in FINAL_PHASES:
-            self._speed_samples.pop((job_id, "download"), None)
-            self._speed_samples.pop((job_id, "upload"), None)
+            self._download_status.pop(job_id, None)
+            self._upload_status.pop(job_id, None)
             self._last_progress_sync_at = {
                 key: value
                 for key, value in self._last_progress_sync_at.items()

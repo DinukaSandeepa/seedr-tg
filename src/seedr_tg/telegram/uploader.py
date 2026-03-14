@@ -45,6 +45,12 @@ class TelegramCodeInvalidError(RuntimeError):
 
 
 class TelegramUploader:
+    _UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.0
+    _UPLOAD_RETRY_MAX_DELAY_SECONDS = 30.0
+    _UPLOAD_GOVERNOR_ENABLED = True
+    _UPLOAD_GOVERNOR_MIN_CONCURRENCY = 1
+    _UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES = 6
+
     def __init__(
         self,
         *,
@@ -162,19 +168,14 @@ class TelegramUploader:
         max_concurrent_uploads: int = 1,
         upload_part_size_kb: int = 512,
         upload_max_retries: int = 4,
-        upload_retry_base_delay_seconds: float = 1.0,
-        upload_retry_max_delay_seconds: float = 30.0,
-        upload_governor_enabled: bool = True,
-        upload_governor_min_concurrency: int = 1,
-        upload_governor_scale_up_after_stable_files: int = 6,
     ) -> None:
         client = await self._get_client()
         total_files = len(file_paths)
         requested_upload_concurrency = max(1, int(max_concurrent_uploads))
-        min_upload_concurrency = max(1, int(upload_governor_min_concurrency))
+        min_upload_concurrency = self._UPLOAD_GOVERNOR_MIN_CONCURRENCY
         effective_upload_concurrency = await self._determine_effective_upload_concurrency(
             requested_upload_concurrency=requested_upload_concurrency,
-            upload_governor_enabled=upload_governor_enabled,
+            upload_governor_enabled=self._UPLOAD_GOVERNOR_ENABLED,
             upload_governor_min_concurrency=min_upload_concurrency,
         )
         semaphore = asyncio.Semaphore(effective_upload_concurrency)
@@ -247,15 +248,13 @@ class TelegramUploader:
                     client,
                     kwargs,
                     upload_max_retries=upload_max_retries,
-                    upload_retry_base_delay_seconds=upload_retry_base_delay_seconds,
-                    upload_retry_max_delay_seconds=upload_retry_max_delay_seconds,
                 )
-                if upload_governor_enabled:
+                if self._UPLOAD_GOVERNOR_ENABLED:
                     await self._record_upload_outcome(
                         requested_upload_concurrency=requested_upload_concurrency,
                         upload_governor_min_concurrency=min_upload_concurrency,
                         upload_governor_scale_up_after_stable_files=(
-                            upload_governor_scale_up_after_stable_files
+                            self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES
                         ),
                         had_flood_wait=had_flood_wait,
                         retry_count=retry_count,
@@ -283,8 +282,6 @@ class TelegramUploader:
         kwargs: dict[str, Any],
         *,
         upload_max_retries: int,
-        upload_retry_base_delay_seconds: float,
-        upload_retry_max_delay_seconds: float,
     ) -> tuple[bool, int]:
         max_attempts = max(1, int(upload_max_retries))
         had_flood_wait = False
@@ -303,10 +300,10 @@ class TelegramUploader:
                 if not self._is_retryable_upload_error(exc) or attempt >= max_attempts:
                     raise
                 backoff = min(
-                    upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
-                    upload_retry_max_delay_seconds,
+                    self._UPLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                    self._UPLOAD_RETRY_MAX_DELAY_SECONDS,
                 )
-                jitter = random.uniform(0.0, upload_retry_base_delay_seconds)
+                jitter = random.uniform(0.0, self._UPLOAD_RETRY_BASE_DELAY_SECONDS)
                 delay = backoff + jitter
                 LOGGER.warning(
                     "Retrying Telegram upload (attempt %s/%s) in %.2fs due to %s",

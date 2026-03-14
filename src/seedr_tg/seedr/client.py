@@ -39,6 +39,17 @@ class RemoteFile:
 
 class SeedrService:
     _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+    _HTTP_TIMEOUT_CONNECT_SECONDS = 10.0
+    _HTTP_TIMEOUT_READ_SECONDS = 120.0
+    _HTTP_TIMEOUT_WRITE_SECONDS = 30.0
+    _HTTP_TIMEOUT_POOL_SECONDS = 10.0
+    _DOWNLOAD_RETRY_BASE_DELAY_SECONDS = 1.0
+    _DOWNLOAD_RETRY_MAX_DELAY_SECONDS = 20.0
+    _ARIA2_BINARY = "aria2c"
+    _ARIA2_SPLIT = 8
+    _ARIA2_MAX_CONNECTION_PER_SERVER = 4
+    _ARIA2_MIN_SPLIT_SIZE = "8M"
+    _ARIA2_FILE_ALLOCATION = "none"
 
     def __init__(self, settings: Settings, repository: JobRepository) -> None:
         self._settings = settings
@@ -52,10 +63,10 @@ class SeedrService:
             return
         if self._http_client is None:
             timeout = httpx.Timeout(
-                connect=self._settings.download_connect_timeout_seconds,
-                read=self._settings.download_read_timeout_seconds,
-                write=self._settings.download_write_timeout_seconds,
-                pool=self._settings.download_pool_timeout_seconds,
+                connect=self._HTTP_TIMEOUT_CONNECT_SECONDS,
+                read=self._HTTP_TIMEOUT_READ_SECONDS,
+                write=self._HTTP_TIMEOUT_WRITE_SECONDS,
+                pool=self._HTTP_TIMEOUT_POOL_SECONDS,
             )
             self._http_client = httpx.AsyncClient(
                 follow_redirects=True,
@@ -106,12 +117,22 @@ class SeedrService:
         result = await client.add_torrent(magnet_link=magnet_link)
         return result.user_torrent_id
 
-    async def resolve_torrent(self, torrent_id: int | None, known_folder_id: int | None = None) -> ResolvedTorrent:
+    async def resolve_torrent(
+        self,
+        torrent_id: int | None,
+        known_folder_id: int | None = None,
+    ) -> ResolvedTorrent:
         client = await self._get_client()
         contents = await client.list_contents()
         torrent = self._find_torrent(contents.torrents, torrent_id)
-        folder = self._find_folder(contents.folders, (torrent.folder if torrent else None) or known_folder_id)
-        if folder is None and torrent is None and known_folder_id is None and torrent_id is not None:
+        folder_hint = (torrent.folder if torrent else None) or known_folder_id
+        folder = self._find_folder(contents.folders, folder_hint)
+        if (
+            folder is None
+            and torrent is None
+            and known_folder_id is None
+            and torrent_id is not None
+        ):
             # Seedr can drop completed torrents before files/folder metadata is fully linked.
             # If exactly one folder remains at root, treat it as the completed torrent output.
             folder = self._single_folder_fallback(contents.folders)
@@ -237,10 +258,10 @@ class SeedrService:
                 if not is_retryable or attempt >= max_attempts:
                     raise
                 backoff = min(
-                    self._settings.download_retry_base_delay_seconds * (2 ** (attempt - 1)),
-                    self._settings.download_retry_max_delay_seconds,
+                    self._DOWNLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                    self._DOWNLOAD_RETRY_MAX_DELAY_SECONDS,
                 )
-                jitter = random.uniform(0.0, self._settings.download_retry_base_delay_seconds)
+                jitter = random.uniform(0.0, self._DOWNLOAD_RETRY_BASE_DELAY_SECONDS)
                 delay = backoff + jitter
                 LOGGER.warning(
                     "Retrying Seedr file download (attempt %s/%s) in %.2fs due to %s",
@@ -257,7 +278,7 @@ class SeedrService:
         destination: Path,
         progress_hook: Any | None = None,
     ) -> None:
-        aria2_binary = self._settings.aria2_binary.strip() or "aria2c"
+        aria2_binary = self._ARIA2_BINARY
         aria2_path = shutil.which(aria2_binary)
         if aria2_path is None:
             raise RuntimeError(f"aria2 binary '{aria2_binary}' is not available in PATH")
@@ -275,16 +296,16 @@ class SeedrService:
             "--summary-interval=0",
             "--console-log-level=warn",
             "--download-result=hide",
-            f"--split={max(1, int(self._settings.aria2_split))}",
+            f"--split={max(1, int(self._ARIA2_SPLIT))}",
             (
                 "--max-connection-per-server="
-                f"{max(1, int(self._settings.aria2_max_connection_per_server))}"
+                f"{max(1, int(self._ARIA2_MAX_CONNECTION_PER_SERVER))}"
             ),
-            f"--min-split-size={self._settings.aria2_min_split_size}",
-            f"--file-allocation={self._settings.aria2_file_allocation}",
+            f"--min-split-size={self._ARIA2_MIN_SPLIT_SIZE}",
+            f"--file-allocation={self._ARIA2_FILE_ALLOCATION}",
             f"--max-tries={max(1, int(self._settings.download_max_retries))}",
             "--retry-wait=1",
-            f"--timeout={max(5, int(self._settings.download_read_timeout_seconds))}",
+            f"--timeout={max(5, int(self._HTTP_TIMEOUT_READ_SECONDS))}",
             "--dir",
             str(destination.parent),
             "--out",
@@ -356,7 +377,7 @@ class SeedrService:
 
     @staticmethod
     def _is_retryable_download_error(exc: BaseException) -> bool:
-        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)):
+        if isinstance(exc, httpx.TimeoutException | httpx.ConnectError | httpx.ReadError):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
