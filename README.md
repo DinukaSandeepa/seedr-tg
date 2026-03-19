@@ -22,9 +22,11 @@ Copy `.env.example` to `.env` and fill these values:
 - `TELEGRAM_SOURCE_CHAT_ID`: Channel or chat that receives the magnet messages.
 - `TELEGRAM_TARGET_CHAT_ID`: Destination where completed files are uploaded.
 - `TELEGRAM_ADMIN_CHAT_ID`: Private admin chat for progress and cancel controls.
-- `MONGODB_URI` and `MONGODB_DATABASE`: MongoDB connection for jobs, auth state, and Telegram user session storage.
+- `MONGODB_URI`: MongoDB connection for jobs, auth state, and Telegram user session storage.
 - `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
 - `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
+
+All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` to keep `.env` minimal.
 
 ## Run (OS-specific)
 

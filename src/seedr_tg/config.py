@@ -22,80 +22,35 @@ class Settings(BaseSettings):
     )
     seedr_token_json: str | None = Field(default=None, alias="SEEDR_TOKEN_JSON")
     mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
-    mongodb_database: str = Field(default="seedr_tg", alias="MONGODB_DATABASE")
-    download_root: Path = Field(default=Path("downloads"), alias="DOWNLOAD_ROOT")
-    max_seedr_file_size_bytes: int = Field(
-        default=4 * 1024 * 1024 * 1024,
-        alias="MAX_SEEDR_FILE_SIZE_BYTES",
-    )
-    poll_interval_seconds: float = Field(default=10.0, alias="POLL_INTERVAL_SECONDS")
-    progress_update_interval_seconds: float = Field(
-        default=5.0,
-        alias="PROGRESS_UPDATE_INTERVAL_SECONDS",
-    )
-    download_concurrency: int = Field(default=4, alias="DOWNLOAD_CONCURRENCY")
-    upload_concurrency: int = Field(default=2, alias="UPLOAD_CONCURRENCY")
-    upload_part_size_kb: int = Field(default=512, alias="UPLOAD_PART_SIZE_KB")
-    upload_governor_enabled: bool = Field(default=True, alias="UPLOAD_GOVERNOR_ENABLED")
-    upload_governor_min_concurrency: int = Field(
-        default=1,
-        alias="UPLOAD_GOVERNOR_MIN_CONCURRENCY",
-    )
-    upload_governor_scale_up_after_stable_files: int = Field(
-        default=6,
-        alias="UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES",
-    )
-    use_uvloop: bool = Field(default=True, alias="USE_UVLOOP")
-    use_aria2_downloads: bool = Field(default=False, alias="USE_ARIA2_DOWNLOADS")
-    aria2_binary: str = Field(default="aria2c", alias="ARIA2_BINARY")
-    aria2_split: int = Field(default=8, alias="ARIA2_SPLIT")
-    aria2_max_connection_per_server: int = Field(
-        default=4,
-        alias="ARIA2_MAX_CONNECTION_PER_SERVER",
-    )
-    aria2_min_split_size: str = Field(default="8M", alias="ARIA2_MIN_SPLIT_SIZE")
-    aria2_file_allocation: Literal["none", "prealloc", "trunc", "falloc"] = Field(
-        default="none",
-        alias="ARIA2_FILE_ALLOCATION",
-    )
-    download_connect_timeout_seconds: float = Field(
-        default=10.0,
-        alias="DOWNLOAD_CONNECT_TIMEOUT_SECONDS",
-    )
-    download_read_timeout_seconds: float = Field(
-        default=120.0,
-        alias="DOWNLOAD_READ_TIMEOUT_SECONDS",
-    )
-    download_write_timeout_seconds: float = Field(
-        default=30.0,
-        alias="DOWNLOAD_WRITE_TIMEOUT_SECONDS",
-    )
-    download_pool_timeout_seconds: float = Field(
-        default=10.0,
-        alias="DOWNLOAD_POOL_TIMEOUT_SECONDS",
-    )
-    download_max_retries: int = Field(default=4, alias="DOWNLOAD_MAX_RETRIES")
-    download_retry_base_delay_seconds: float = Field(
-        default=1.0,
-        alias="DOWNLOAD_RETRY_BASE_DELAY_SECONDS",
-    )
-    download_retry_max_delay_seconds: float = Field(
-        default=20.0,
-        alias="DOWNLOAD_RETRY_MAX_DELAY_SECONDS",
-    )
-    upload_max_retries: int = Field(default=4, alias="UPLOAD_MAX_RETRIES")
-    upload_retry_base_delay_seconds: float = Field(
-        default=1.0,
-        alias="UPLOAD_RETRY_BASE_DELAY_SECONDS",
-    )
-    upload_retry_max_delay_seconds: float = Field(
-        default=30.0,
-        alias="UPLOAD_RETRY_MAX_DELAY_SECONDS",
-    )
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
-        default="INFO",
-        alias="LOG_LEVEL",
-    )
+    mongodb_database: str = "seedr_tg"
+    download_root: Path = Path("downloads")
+    max_seedr_file_size_bytes: int = 4 * 1024 * 1024 * 1024
+    poll_interval_seconds: float = 10.0
+    progress_update_interval_seconds: float = 5.0
+    download_concurrency: int = 4
+    upload_concurrency: int = 2
+    upload_part_size_kb: int = 512
+    upload_governor_enabled: bool = True
+    upload_governor_min_concurrency: int = 1
+    upload_governor_scale_up_after_stable_files: int = 6
+    use_uvloop: bool = True
+    use_aria2_downloads: bool = True
+    aria2_binary: str = "aria2c"
+    aria2_split: int = 8
+    aria2_max_connection_per_server: int = 4
+    aria2_min_split_size: str = "8M"
+    aria2_file_allocation: Literal["none", "prealloc", "trunc", "falloc"] = "none"
+    download_connect_timeout_seconds: float = 10.0
+    download_read_timeout_seconds: float = 120.0
+    download_write_timeout_seconds: float = 30.0
+    download_pool_timeout_seconds: float = 10.0
+    download_max_retries: int = 4
+    download_retry_base_delay_seconds: float = 1.0
+    download_retry_max_delay_seconds: float = 20.0
+    upload_max_retries: int = 4
+    upload_retry_base_delay_seconds: float = 1.0
+    upload_retry_max_delay_seconds: float = 30.0
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @field_validator("download_root", mode="before")
     @classmethod

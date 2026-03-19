@@ -10,6 +10,9 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from telegram import Bot, InputFile
+from telegram.constants import ParseMode
+from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telethon import TelegramClient
 from telethon.errors import (
     FloodWaitError,
@@ -18,6 +21,7 @@ from telethon.errors import (
     RPCError,
     SessionPasswordNeededError,
 )
+from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
 from telethon.sessions import StringSession
 
 from seedr_tg.db.models import (
@@ -45,26 +49,52 @@ class TelegramCodeInvalidError(RuntimeError):
 
 
 class TelegramUploader:
+    _UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.0
+    _UPLOAD_RETRY_MAX_DELAY_SECONDS = 30.0
+    _UPLOAD_GOVERNOR_ENABLED = True
+    _UPLOAD_GOVERNOR_MIN_CONCURRENCY = 1
+    _UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES = 6
+    _PREMIUM_UPLOAD_THRESHOLD_BYTES = 2 * 1024 * 1024 * 1024
+    _BOT_CONNECT_TIMEOUT_SECONDS = 30.0
+    _BOT_POOL_TIMEOUT_SECONDS = 30.0
+    _BOT_WRITE_TIMEOUT_SECONDS = 900.0
+    _BOT_READ_TIMEOUT_SECONDS = 900.0
+
+    @staticmethod
+    def _create_client(session_string: str, api_id: int, api_hash: str) -> TelegramClient:
+        # Abridged transport reduces MTProto framing overhead vs TcpFull.
+        return TelegramClient(
+            StringSession(session_string),
+            api_id,
+            api_hash,
+            connection=ConnectionTcpAbridged,
+        )
+
     def __init__(
         self,
         *,
         api_id: int,
         api_hash: str,
+        bot_token: str,
         target_chat_id: int,
         repository: JobRepository,
         bootstrap_session_string: str | None = None,
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
+        self._bot_token = bot_token
         self._target_chat_id = target_chat_id
         self._repository = repository
         self._bootstrap_session_string = bootstrap_session_string
         self._client: TelegramClient | None = None
+        self._bot: Bot | None = None
         self._governor_lock = asyncio.Lock()
         self._adaptive_upload_cap: int | None = None
         self._stable_upload_streak = 0
 
     async def start(self) -> None:
+        if self._bot is None:
+            self._bot = Bot(self._bot_token)
         if (
             self._bootstrap_session_string
             and await self._repository.get_telegram_user_session() is None
@@ -82,9 +112,12 @@ class TelegramUploader:
         if self._client is not None:
             await self._client.disconnect()
             self._client = None
+        if self._bot is not None:
+            await self._bot.close()
+            self._bot = None
 
     async def begin_login(self, phone_number: str) -> TelegramLoginState:
-        client = TelegramClient(StringSession(), self._api_id, self._api_hash)
+        client = self._create_client("", self._api_id, self._api_hash)
         await client.connect()
         try:
             sent = await client.send_code_request(phone_number)
@@ -102,7 +135,7 @@ class TelegramUploader:
         state = await self._repository.get_telegram_login_state()
         if state is None:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
-        client = TelegramClient(StringSession(state.session_string), self._api_id, self._api_hash)
+        client = self._create_client(state.session_string, self._api_id, self._api_hash)
         await client.connect()
         try:
             await client.sign_in(
@@ -142,7 +175,7 @@ class TelegramUploader:
             raise RuntimeError("No pending Telegram login. Run /session_start <phone> first.")
         if not state.password_required:
             raise RuntimeError("Current Telegram login does not require a password.")
-        client = TelegramClient(StringSession(state.session_string), self._api_id, self._api_hash)
+        client = self._create_client(state.session_string, self._api_id, self._api_hash)
         await client.connect()
         try:
             await client.sign_in(password=password)
@@ -162,19 +195,13 @@ class TelegramUploader:
         max_concurrent_uploads: int = 1,
         upload_part_size_kb: int = 512,
         upload_max_retries: int = 4,
-        upload_retry_base_delay_seconds: float = 1.0,
-        upload_retry_max_delay_seconds: float = 30.0,
-        upload_governor_enabled: bool = True,
-        upload_governor_min_concurrency: int = 1,
-        upload_governor_scale_up_after_stable_files: int = 6,
     ) -> None:
-        client = await self._get_client()
         total_files = len(file_paths)
         requested_upload_concurrency = max(1, int(max_concurrent_uploads))
-        min_upload_concurrency = max(1, int(upload_governor_min_concurrency))
+        min_upload_concurrency = self._UPLOAD_GOVERNOR_MIN_CONCURRENCY
         effective_upload_concurrency = await self._determine_effective_upload_concurrency(
             requested_upload_concurrency=requested_upload_concurrency,
-            upload_governor_enabled=upload_governor_enabled,
+            upload_governor_enabled=self._UPLOAD_GOVERNOR_ENABLED,
             upload_governor_min_concurrency=min_upload_concurrency,
         )
         semaphore = asyncio.Semaphore(effective_upload_concurrency)
@@ -243,19 +270,35 @@ class TelegramUploader:
                 kwargs["thumb"] = str(thumb_path)
 
             async with semaphore:
-                had_flood_wait, retry_count = await self._send_file_with_retry(
-                    client,
-                    kwargs,
-                    upload_max_retries=upload_max_retries,
-                    upload_retry_base_delay_seconds=upload_retry_base_delay_seconds,
-                    upload_retry_max_delay_seconds=upload_retry_max_delay_seconds,
-                )
-                if upload_governor_enabled:
+                file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
+                use_premium_session = file_size_bytes > self._PREMIUM_UPLOAD_THRESHOLD_BYTES
+                if use_premium_session:
+                    client = await self._get_client()
+                    had_flood_wait, retry_count = await self._send_file_with_retry(
+                        client,
+                        kwargs,
+                        upload_max_retries=upload_max_retries,
+                    )
+                else:
+                    had_flood_wait, retry_count = await self._send_file_via_bot_with_retry(
+                        file_path=file_path,
+                        caption=caption,
+                        parse_mode=parse_mode,
+                        media_type=(
+                            upload_settings.media_type if upload_settings else UploadMediaType.MEDIA
+                        ),
+                        thumb_path=thumb_path,
+                        upload_max_retries=upload_max_retries,
+                        progress_hook=progress_hook,
+                        completed_files=completed_files,
+                        total_files=total_files,
+                    )
+                if self._UPLOAD_GOVERNOR_ENABLED:
                     await self._record_upload_outcome(
                         requested_upload_concurrency=requested_upload_concurrency,
                         upload_governor_min_concurrency=min_upload_concurrency,
                         upload_governor_scale_up_after_stable_files=(
-                            upload_governor_scale_up_after_stable_files
+                            self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES
                         ),
                         had_flood_wait=had_flood_wait,
                         retry_count=retry_count,
@@ -283,8 +326,6 @@ class TelegramUploader:
         kwargs: dict[str, Any],
         *,
         upload_max_retries: int,
-        upload_retry_base_delay_seconds: float,
-        upload_retry_max_delay_seconds: float,
     ) -> tuple[bool, int]:
         max_attempts = max(1, int(upload_max_retries))
         had_flood_wait = False
@@ -303,17 +344,146 @@ class TelegramUploader:
                 if not self._is_retryable_upload_error(exc) or attempt >= max_attempts:
                     raise
                 backoff = min(
-                    upload_retry_base_delay_seconds * (2 ** (attempt - 1)),
-                    upload_retry_max_delay_seconds,
+                    self._UPLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                    self._UPLOAD_RETRY_MAX_DELAY_SECONDS,
                 )
-                jitter = random.uniform(0.0, upload_retry_base_delay_seconds)
+                jitter = random.uniform(0.0, self._UPLOAD_RETRY_BASE_DELAY_SECONDS)
                 delay = backoff + jitter
                 LOGGER.warning(
                     "Retrying Telegram upload (attempt %s/%s) in %.2fs due to %s",
                     attempt,
                     max_attempts,
                     delay,
-                    exc,
+                    repr(exc),
+                )
+                await asyncio.sleep(delay)
+        return had_flood_wait, max_attempts - 1
+
+    async def _send_file_via_bot_with_retry(
+        self,
+        *,
+        file_path: Path,
+        caption: str,
+        parse_mode: str | None,
+        media_type: UploadMediaType,
+        thumb_path: Path | None,
+        upload_max_retries: int,
+        progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None,
+        completed_files: int,
+        total_files: int,
+    ) -> tuple[bool, int]:
+        bot = self._bot
+        if bot is None:
+            self._bot = Bot(self._bot_token)
+            bot = self._bot
+        if bot is None:
+            raise RuntimeError("Telegram bot client is not initialized")
+
+        max_attempts = max(1, int(upload_max_retries))
+        had_flood_wait = False
+        total_bytes = file_path.stat().st_size if file_path.exists() else 0
+        bot_parse_mode = self._resolve_bot_parse_mode(parse_mode)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with file_path.open("rb") as handle:
+                    upload_input = InputFile(
+                        handle,
+                        filename=file_path.name,
+                        read_file_handle=False,
+                    )
+                    if media_type == UploadMediaType.DOCUMENT:
+                        if thumb_path is not None and thumb_path.exists():
+                            with thumb_path.open("rb") as thumb_handle:
+                                thumb_input = InputFile(
+                                    thumb_handle,
+                                    filename=thumb_path.name,
+                                    read_file_handle=False,
+                                )
+                                await bot.send_document(
+                                    chat_id=self._target_chat_id,
+                                    document=upload_input,
+                                    caption=caption,
+                                    parse_mode=bot_parse_mode,
+                                    thumbnail=thumb_input,
+                                    connect_timeout=self._BOT_CONNECT_TIMEOUT_SECONDS,
+                                    pool_timeout=self._BOT_POOL_TIMEOUT_SECONDS,
+                                    write_timeout=self._BOT_WRITE_TIMEOUT_SECONDS,
+                                    read_timeout=self._BOT_READ_TIMEOUT_SECONDS,
+                                )
+                        else:
+                            await bot.send_document(
+                                chat_id=self._target_chat_id,
+                                document=upload_input,
+                                caption=caption,
+                                parse_mode=bot_parse_mode,
+                                connect_timeout=self._BOT_CONNECT_TIMEOUT_SECONDS,
+                                pool_timeout=self._BOT_POOL_TIMEOUT_SECONDS,
+                                write_timeout=self._BOT_WRITE_TIMEOUT_SECONDS,
+                                read_timeout=self._BOT_READ_TIMEOUT_SECONDS,
+                            )
+                    elif thumb_path is not None and thumb_path.exists():
+                        with thumb_path.open("rb") as thumb_handle:
+                            thumb_input = InputFile(
+                                thumb_handle,
+                                filename=thumb_path.name,
+                                read_file_handle=False,
+                            )
+                            await bot.send_video(
+                                chat_id=self._target_chat_id,
+                                video=upload_input,
+                                caption=caption,
+                                parse_mode=bot_parse_mode,
+                                supports_streaming=True,
+                                thumbnail=thumb_input,
+                                connect_timeout=self._BOT_CONNECT_TIMEOUT_SECONDS,
+                                pool_timeout=self._BOT_POOL_TIMEOUT_SECONDS,
+                                write_timeout=self._BOT_WRITE_TIMEOUT_SECONDS,
+                                read_timeout=self._BOT_READ_TIMEOUT_SECONDS,
+                            )
+                    else:
+                        await bot.send_video(
+                            chat_id=self._target_chat_id,
+                            video=upload_input,
+                            caption=caption,
+                            parse_mode=bot_parse_mode,
+                            supports_streaming=True,
+                            connect_timeout=self._BOT_CONNECT_TIMEOUT_SECONDS,
+                            pool_timeout=self._BOT_POOL_TIMEOUT_SECONDS,
+                            write_timeout=self._BOT_WRITE_TIMEOUT_SECONDS,
+                            read_timeout=self._BOT_READ_TIMEOUT_SECONDS,
+                        )
+
+                if progress_hook is not None:
+                    await progress_hook(
+                        completed_files,
+                        total_files,
+                        f"{file_path.name} {total_bytes}/{total_bytes}",
+                        int(total_bytes),
+                        int(total_bytes),
+                    )
+                return had_flood_wait, attempt - 1
+            except RetryAfter as exc:
+                had_flood_wait = True
+                wait_seconds = max(1, int(exc.retry_after))
+                LOGGER.warning("Bot API flood wait while uploading; sleeping %ss", wait_seconds)
+                await asyncio.sleep(wait_seconds)
+                if attempt >= max_attempts:
+                    raise
+            except (TimedOut, NetworkError, TelegramError, OSError, TimeoutError) as exc:
+                if attempt >= max_attempts:
+                    raise
+                backoff = min(
+                    self._UPLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+                    self._UPLOAD_RETRY_MAX_DELAY_SECONDS,
+                )
+                jitter = random.uniform(0.0, self._UPLOAD_RETRY_BASE_DELAY_SECONDS)
+                delay = backoff + jitter
+                LOGGER.warning(
+                    "Retrying bot upload (attempt %s/%s) in %.2fs due to %s",
+                    attempt,
+                    max_attempts,
+                    delay,
+                    repr(exc),
                 )
                 await asyncio.sleep(delay)
         return had_flood_wait, max_attempts - 1
@@ -390,6 +560,17 @@ class TelegramUploader:
         return any(token in name for token in ("timeout", "connection", "rpc", "server"))
 
     @staticmethod
+    def _resolve_bot_parse_mode(parse_mode: str | None) -> str | None:
+        if parse_mode is None:
+            return None
+        normalized = parse_mode.strip().lower()
+        if normalized == "html":
+            return ParseMode.HTML
+        if normalized in {"md", "markdown", "markdownv2", "markdown_v2"}:
+            return ParseMode.MARKDOWN_V2
+        return None
+
+    @staticmethod
     def _handle_progress_emit_done(task: asyncio.Task[None]) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             exc = task.exception()
@@ -458,7 +639,7 @@ class TelegramUploader:
         return self._client
 
     async def _connect_client(self, session_string: str) -> TelegramClient:
-        client = TelegramClient(StringSession(session_string), self._api_id, self._api_hash)
+        client = self._create_client(session_string, self._api_id, self._api_hash)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
