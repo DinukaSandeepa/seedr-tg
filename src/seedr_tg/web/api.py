@@ -81,16 +81,20 @@ class WebApiServer:
 
         @app.get("/api/jobs")
         async def jobs() -> list[QueueJobResponse]:
-            queue = await self._list_jobs_callback()
-            return [
-                QueueJobResponse(
-                    id=job.id,
-                    phase=job.phase.value,
-                    progress_percent=float(job.progress_percent),
-                    current_step=job.current_step,
-                )
-                for job in queue
-            ]
+            try:
+                queue = await self._list_jobs_callback()
+                return [
+                    QueueJobResponse(
+                        id=job.id,
+                        phase=job.phase.value,
+                        progress_percent=float(job.progress_percent),
+                        current_step=job.current_step,
+                    )
+                    for job in queue
+                ]
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("Failed to fetch job queue", exc_info=exc)
+                raise HTTPException(status_code=500, detail="Failed to fetch job queue") from exc
 
         @app.post("/api/magnets", response_model=MagnetCreateResponse)
         async def submit_magnet(payload: MagnetCreateRequest) -> MagnetCreateResponse:
