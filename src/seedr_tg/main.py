@@ -129,15 +129,21 @@ async def run() -> None:
     try:
         await stop_event.wait()
     finally:
-        await queue_runner.stop()
+        with contextlib.suppress(Exception):
+            await queue_runner.stop()
         worker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
-        await web_api.stop()
-        await bot_app.stop()
-        await uploader.stop()
-        await seedr_service.stop()
-        await repository.close()
+        with contextlib.suppress(Exception):
+            await web_api.stop()
+        with contextlib.suppress(Exception):
+            await bot_app.stop()
+        with contextlib.suppress(Exception):
+            await uploader.stop()
+        with contextlib.suppress(Exception):
+            await seedr_service.stop()
+        with contextlib.suppress(Exception):
+            await repository.close()
 
 
 def main() -> None:

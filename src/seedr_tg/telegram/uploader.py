@@ -110,10 +110,19 @@ class TelegramUploader:
 
     async def stop(self) -> None:
         if self._client is not None:
-            await self._client.disconnect()
+            with contextlib.suppress(Exception):
+                await self._client.disconnect()
             self._client = None
         if self._bot is not None:
-            await self._bot.close()
+            try:
+                await self._bot.close()
+            except RetryAfter as exc:
+                LOGGER.warning(
+                    "Skipping bot.close() due to Telegram flood wait during shutdown: retry_after=%s",
+                    exc.retry_after,
+                )
+            except (TelegramError, NetworkError, TimedOut) as exc:
+                LOGGER.warning("Skipping bot.close() due to shutdown error: %s", exc)
             self._bot = None
 
     async def begin_login(self, phone_number: str) -> TelegramLoginState:
