@@ -54,7 +54,7 @@ class TelegramUploader:
     _UPLOAD_GOVERNOR_ENABLED = True
     _UPLOAD_GOVERNOR_MIN_CONCURRENCY = 1
     _UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES = 6
-    _PREMIUM_UPLOAD_THRESHOLD_BYTES = 2 * 1024 * 1024 * 1024
+    _BOT_API_FILE_SIZE_LIMIT_BYTES = 50 * 1024 * 1024
     _BOT_CONNECT_TIMEOUT_SECONDS = 30.0
     _BOT_POOL_TIMEOUT_SECONDS = 30.0
     _BOT_WRITE_TIMEOUT_SECONDS = 900.0
@@ -313,8 +313,8 @@ class TelegramUploader:
 
             async with semaphore:
                 file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
-                use_premium_session = file_size_bytes > self._PREMIUM_UPLOAD_THRESHOLD_BYTES
-                if use_premium_session:
+                use_client_session = file_size_bytes > self._BOT_API_FILE_SIZE_LIMIT_BYTES
+                if use_client_session:
                     client = await self._get_client()
                     had_flood_wait, retry_count = await self._send_file_with_retry(
                         client,
