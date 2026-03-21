@@ -213,13 +213,6 @@ class QueueRunner:
             max_concurrent_uploads=self._settings.upload_concurrency,
             upload_part_size_kb=self._settings.upload_part_size_kb,
             upload_max_retries=self._settings.upload_max_retries,
-            upload_retry_base_delay_seconds=self._settings.upload_retry_base_delay_seconds,
-            upload_retry_max_delay_seconds=self._settings.upload_retry_max_delay_seconds,
-            upload_governor_enabled=self._settings.upload_governor_enabled,
-            upload_governor_min_concurrency=self._settings.upload_governor_min_concurrency,
-            upload_governor_scale_up_after_stable_files=(
-                self._settings.upload_governor_scale_up_after_stable_files
-            ),
             progress_hook=upload_progress_hook,
         )
 
@@ -357,10 +350,14 @@ class QueueRunner:
             raise asyncio.CancelledError(f"Job {job_id} canceled")
 
         self._cancel_processed_jobs.add(job_id)
-        await self._seedr_service.delete_torrent(job.seedr_torrent_id)
-        await self._seedr_service.delete_folder(job.seedr_folder_id)
+        with contextlib.suppress(Exception):
+            await self._seedr_service.delete_torrent(job.seedr_torrent_id)
+        with contextlib.suppress(Exception):
+            await self._seedr_service.delete_folder(job.seedr_folder_id)
         if job.local_path:
             shutil.rmtree(job.local_path, ignore_errors=True)
+        local_root = self._settings.download_root / f"job_{job.id}"
+        shutil.rmtree(local_root, ignore_errors=True)
         canceled = await self._transition(
             job_id,
             phase=JobPhase.CANCELED,
@@ -368,10 +365,15 @@ class QueueRunner:
             failure_reason="Cancellation requested",
         )
         await self._sync_admin_message(canceled)
+        await self._repository.delete_job(job_id)
+        await self._repository.renumber_queue()
         raise asyncio.CancelledError(f"Job {job_id} canceled")
 
     async def _mark_failed(self, job_id: int, reason: str) -> None:
-        job = await self._repository.get_job(job_id)
+        try:
+            job = await self._repository.get_job(job_id)
+        except LookupError:
+            return
         with contextlib.suppress(Exception):
             await self._seedr_service.delete_torrent(job.seedr_torrent_id)
         with contextlib.suppress(Exception):
@@ -447,7 +449,12 @@ class QueueRunner:
         return float(current_bytes - prev_bytes) / elapsed
 
     async def _transition(self, job_id: int, **updates) -> JobRecord:
-        job = await self._repository.update_job(job_id, **updates)
+        try:
+            job = await self._repository.update_job(job_id, **updates)
+        except LookupError as exc:
+            if job_id in self._cancel_processed_jobs:
+                raise asyncio.CancelledError(f"Job {job_id} canceled") from exc
+            raise
         if job.phase in FINAL_PHASES:
             self._speed_samples.pop((job_id, "download"), None)
             self._speed_samples.pop((job_id, "upload"), None)

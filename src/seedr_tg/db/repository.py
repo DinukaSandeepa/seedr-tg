@@ -144,6 +144,11 @@ class JobRepository:
     async def request_cancel(self, job_id: int) -> JobRecord:
         return await self.update_job(job_id, cancel_requested=True)
 
+    async def delete_job(self, job_id: int) -> bool:
+        async with self._write_lock:
+            result = await self._jobs.delete_one({"_id": job_id})
+            return bool(result.deleted_count)
+
     async def renumber_queue(self) -> None:
         async with self._write_lock:
             active_jobs = await self.list_jobs(include_final=False)

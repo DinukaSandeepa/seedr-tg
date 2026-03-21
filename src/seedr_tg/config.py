@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     seedr_token_json: str | None = Field(default=None, alias="SEEDR_TOKEN_JSON")
     mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
     mongodb_database: str = "seedr_tg"
-    web_api_allowed_origins: tuple[str, ...] = (
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
+    web_api_allowed_origins_raw: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        alias="WEB_API_ALLOWED_ORIGINS",
     )
     download_root: Path = Path("downloads")
     max_seedr_file_size_bytes: int = 4 * 1024 * 1024 * 1024
@@ -61,20 +61,15 @@ class Settings(BaseSettings):
     def _expand_path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
 
-    @field_validator("web_api_allowed_origins", mode="before")
-    @classmethod
-    def _parse_web_api_allowed_origins(
-        cls, value: str | tuple[str, ...] | list[str] | None
-    ) -> tuple[str, ...]:
-        if value is None:
-            return (
-                "http://localhost:3000",
-                "http://127.0.0.1:3000",
-            )
-        if isinstance(value, str):
-            items = [origin.strip() for origin in value.split(",") if origin.strip()]
-            return tuple(items)
-        return tuple(str(origin).strip() for origin in value if str(origin).strip())
+    @computed_field
+    @property
+    def web_api_allowed_origins(self) -> tuple[str, ...]:
+        raw_value = str(self.web_api_allowed_origins_raw)
+        items = [origin.strip() for origin in raw_value.split(",")]
+        parsed = tuple(origin for origin in items if origin)
+        if parsed:
+            return parsed
+        return ("http://localhost:3000", "http://127.0.0.1:3000")
 
 
 def load_settings() -> Settings:
