@@ -32,6 +32,26 @@ def test_regex_substitution_case_insensitive_by_default(tmp_path):
     assert result == "My series S01E01.mkv"
 
 
+def test_regex_substitution_case_sensitive_mode(tmp_path):
+    renamer = FilenameRenamer(max_filename_bytes=255)
+
+    result = renamer.build_name(
+        original_name="WEB.Release.mkv",
+        request=RenameRequest(
+            substitutions=[
+                RegexSubstitutionRule(
+                    pattern="web",
+                    replacement="scene",
+                    case_sensitive=True,
+                )
+            ]
+        ),
+        target_directory=tmp_path,
+    )
+
+    assert result == "WEB.Release.mkv"
+
+
 def test_long_name_truncated_to_byte_limit(tmp_path):
     renamer = FilenameRenamer(max_filename_bytes=40)
 
@@ -57,3 +77,15 @@ def test_duplicate_filename_gets_numeric_suffix(tmp_path):
     )
 
     assert result == "sample (1).mp4"
+
+
+def test_invalid_rename_output_falls_back_to_safe_original(tmp_path):
+    renamer = FilenameRenamer(max_filename_bytes=255)
+
+    result = renamer.build_name(
+        original_name="safe_name.mp4",
+        request=RenameRequest(explicit_name="\\/:*?\"<>|"),
+        target_directory=tmp_path,
+    )
+
+    assert result == "safe_name.mp4"

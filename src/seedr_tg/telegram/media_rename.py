@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import shlex
+import shutil
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from telegram import Message, Update
+from telegram.ext import ContextTypes
+
+from seedr_tg.db.repository import JobRepository
+from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
+from seedr_tg.telegram.uploader import TelegramUploader
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class MediaRenameOptions:
+    explicit_name: str | None = None
+    prefix: str | None = None
+    substitutions: list[RegexSubstitutionRule] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TelegramMediaDescriptor:
+    file_id: str
+    original_name: str
+
+
+class TelegramMediaRenameHandler:
+    """Renames replied Telegram media before re-uploading to target chat."""
+
+    def __init__(
+        self,
+        *,
+        uploader: TelegramUploader,
+        repository: JobRepository,
+        renamer: FilenameRenamer,
+        download_root: Path,
+        allowed_chat_ids: set[int],
+    ) -> None:
+        self._uploader = uploader
+        self._repository = repository
+        self._renamer = renamer
+        self._download_root = download_root
+        self._allowed_chat_ids = set(allowed_chat_ids)
+
+    async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if message is None or chat is None:
+            return
+        if chat.id not in self._allowed_chat_ids:
+            await message.reply_text("This command is not enabled for this chat.")
+            return
+        if message.reply_to_message is None:
+            await message.reply_text(
+                "Reply to a Telegram media message and run: "
+                "/rename [--rename <name>] [--prefix <value>] "
+                "[--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>]"
+            )
+            return
+
+        try:
+            descriptor = self._extract_media_descriptor(message.reply_to_message)
+        except ValueError as exc:
+            await message.reply_text(str(exc))
+            return
+
+        try:
+            options = self._parse_options(message.text or "")
+        except ValueError as exc:
+            await message.reply_text(str(exc))
+            return
+
+        selected_mode = self._rename_mode_label(options)
+        temp_dir = (
+            self._download_root
+            / "telegram"
+            / "rename"
+            / f"msg_{chat.id}_{message.message_id}_{uuid.uuid4().hex[:8]}"
+        )
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_download_path = temp_dir / "payload.part"
+
+        try:
+            LOGGER.info(
+                (
+                    "Telegram media rename started chat_id=%s message_id=%s "
+                    "original=%s mode=%s"
+                ),
+                chat.id,
+                message.message_id,
+                descriptor.original_name,
+                selected_mode,
+            )
+
+            telegram_file = await context.bot.get_file(descriptor.file_id)
+            await telegram_file.download_to_drive(custom_path=str(temp_download_path))
+
+            request = RenameRequest(
+                explicit_name=options.explicit_name,
+                prefix=options.prefix,
+                substitutions=options.substitutions,
+            )
+            final_name = self._renamer.build_name(
+                original_name=descriptor.original_name,
+                request=request,
+                target_directory=temp_dir,
+            )
+
+            final_path = temp_dir / final_name
+            await asyncio.to_thread(temp_download_path.rename, final_path)
+
+            upload_settings = await self._repository.get_upload_settings()
+            await self._uploader.upload_files(
+                [final_path],
+                caption_prefix="Telegram media rename",
+                upload_settings=upload_settings,
+                max_concurrent_uploads=1,
+            )
+
+            LOGGER.info(
+                (
+                    "Telegram media rename upload completed chat_id=%s "
+                    "original=%s final=%s"
+                ),
+                chat.id,
+                descriptor.original_name,
+                final_name,
+            )
+            await message.reply_text(
+                "Rename and upload completed.\n"
+                f"Original: {descriptor.original_name}\n"
+                f"Final: {final_name}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception(
+                "Telegram media rename failed chat_id=%s message_id=%s",
+                chat.id,
+                message.message_id,
+            )
+            await message.reply_text(f"Rename upload failed: {exc}")
+        finally:
+            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
+
+    @staticmethod
+    def _extract_media_descriptor(message: Message) -> TelegramMediaDescriptor:
+        if message.document is not None:
+            extension = TelegramMediaRenameHandler._extension_from_name_or_default(
+                message.document.file_name,
+                ".bin",
+            )
+            original_name = (
+                message.document.file_name
+                or f"document_{message.message_id}{extension}"
+            )
+            return TelegramMediaDescriptor(
+                file_id=message.document.file_id,
+                original_name=original_name,
+            )
+
+        if message.video is not None:
+            extension = TelegramMediaRenameHandler._extension_from_name_or_default(
+                message.video.file_name,
+                ".mp4",
+            )
+            original_name = message.video.file_name or f"video_{message.message_id}{extension}"
+            return TelegramMediaDescriptor(
+                file_id=message.video.file_id,
+                original_name=original_name,
+            )
+
+        if message.audio is not None:
+            extension = TelegramMediaRenameHandler._extension_from_name_or_default(
+                message.audio.file_name,
+                ".mp3",
+            )
+            original_name = message.audio.file_name or f"audio_{message.message_id}{extension}"
+            return TelegramMediaDescriptor(
+                file_id=message.audio.file_id,
+                original_name=original_name,
+            )
+
+        if message.animation is not None:
+            extension = TelegramMediaRenameHandler._extension_from_name_or_default(
+                message.animation.file_name,
+                ".mp4",
+            )
+            original_name = (
+                message.animation.file_name
+                or f"animation_{message.message_id}{extension}"
+            )
+            return TelegramMediaDescriptor(
+                file_id=message.animation.file_id,
+                original_name=original_name,
+            )
+
+        if message.voice is not None:
+            return TelegramMediaDescriptor(
+                file_id=message.voice.file_id,
+                original_name=f"voice_{message.message_id}.ogg",
+            )
+
+        if message.photo:
+            photo = message.photo[-1]
+            return TelegramMediaDescriptor(
+                file_id=photo.file_id,
+                original_name=f"photo_{message.message_id}.jpg",
+            )
+
+        raise ValueError(
+            "Replied message has no supported media. "
+            "Use document/video/audio/photo/animation/voice."
+        )
+
+    @staticmethod
+    def _extension_from_name_or_default(file_name: str | None, fallback: str) -> str:
+        if not file_name:
+            return fallback
+        suffix = Path(file_name).suffix
+        return suffix if suffix else fallback
+
+    @staticmethod
+    def _parse_options(text: str) -> MediaRenameOptions:
+        usage = (
+            "Usage: /rename [--rename <name>] [--prefix <value>] "
+            "[--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>]"
+        )
+        try:
+            tokens = shlex.split(text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid command format: {exc}. {usage}") from exc
+
+        options = MediaRenameOptions()
+        idx = 1
+        while idx < len(tokens):
+            token = tokens[idx]
+            if token == "--rename":
+                idx += 1
+                options.explicit_name = TelegramMediaRenameHandler._require_value(
+                    tokens,
+                    idx,
+                    token,
+                )
+            elif token == "--prefix":
+                idx += 1
+                options.prefix = TelegramMediaRenameHandler._require_value(tokens, idx, token)
+            elif token in {"--sub", "--sub-cs"}:
+                idx += 1
+                raw_rule = TelegramMediaRenameHandler._require_value(tokens, idx, token)
+                options.substitutions.append(
+                    TelegramMediaRenameHandler._parse_substitution_rule(
+                        raw_rule,
+                        case_sensitive=(token == "--sub-cs"),
+                    )
+                )
+            elif token.startswith("--"):
+                raise ValueError(f"Unknown option: {token}. {usage}")
+            elif options.explicit_name is None:
+                options.explicit_name = token
+            else:
+                raise ValueError(f"Unexpected token: {token}. {usage}")
+            idx += 1
+        return options
+
+    @staticmethod
+    def _require_value(tokens: list[str], idx: int, option: str) -> str:
+        if idx >= len(tokens):
+            raise ValueError(f"Missing value for {option}.")
+        return tokens[idx]
+
+    @staticmethod
+    def _parse_substitution_rule(raw_value: str, *, case_sensitive: bool) -> RegexSubstitutionRule:
+        if "=>" in raw_value:
+            pattern, replacement = raw_value.split("=>", maxsplit=1)
+        elif "::" in raw_value:
+            pattern, replacement = raw_value.split("::", maxsplit=1)
+        else:
+            raise ValueError(
+                "Substitution must use 'pattern=>replacement' (or 'pattern::replacement')."
+            )
+        if not pattern:
+            raise ValueError("Substitution pattern cannot be empty.")
+        return RegexSubstitutionRule(
+            pattern=pattern,
+            replacement=replacement,
+            case_sensitive=case_sensitive,
+        )
+
+    @staticmethod
+    def _rename_mode_label(options: MediaRenameOptions) -> str:
+        mode_parts: list[str] = []
+        if options.explicit_name:
+            mode_parts.append("explicit")
+        if options.prefix:
+            mode_parts.append("prefix")
+        if options.substitutions:
+            mode_parts.append(f"regex:{len(options.substitutions)}")
+        if not mode_parts:
+            mode_parts.append("original")
+        return "+".join(mode_parts)

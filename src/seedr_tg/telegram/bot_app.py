@@ -61,6 +61,10 @@ class TelegramBotApp:
         update_upload_settings_callback: Callable[..., Awaitable[UploadSettings]],
         reset_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
         direct_download_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
+        telegram_media_rename_handler: Callable[
+            [Update, ContextTypes.DEFAULT_TYPE],
+            Awaitable[None],
+        ],
     ) -> None:
         self._source_chat_id = source_chat_id
         self._admin_chat_id = admin_chat_id
@@ -87,6 +91,7 @@ class TelegramBotApp:
         self._application.add_handler(CommandHandler("session_code", self._session_code))
         self._application.add_handler(CommandHandler("session_password", self._session_password))
         self._application.add_handler(CommandHandler("direct", direct_download_handler))
+        self._application.add_handler(CommandHandler("rename", telegram_media_rename_handler))
         self._application.add_handler(CommandHandler("settings", self._settings))
         self._application.add_handler(
             CallbackQueryHandler(self._handle_settings_callback, pattern=r"^settings:")

@@ -13,6 +13,7 @@ Async Seedr.cc to Telegram relay service for a single channel and single Seedr a
 7. Uploads the files back to Telegram using a premium MTProto session.
 8. Shows progress and cancellation controls in a private admin chat.
 9. Supports direct URL relay with rename rules through `/direct`.
+10. Supports reply-based Telegram media renaming through `/rename`.
 
 ## Configuration
 
@@ -159,6 +160,68 @@ pm2 restart seedr-tg
 ```bash
 pm2 stop seedr-tg
 pm2 delete seedr-tg
+```
+
+## Bot Commands
+
+### Source Chat Commands
+
+- Send a magnet link as plain text to enqueue a new job.
+- /direct <url> [--rename <name>] [--prefix <value>] [--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>]
+- /rename [--rename <name>] [--prefix <value>] [--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>] (reply to a media message)
+
+### Admin Chat Commands
+
+- /status: Show queued/in-progress jobs.
+- /seedr_auth: Start Seedr device authorization flow.
+- /seedr_auth_done: Complete Seedr device authorization after approving the device code.
+- /session_start <phone_number>: Start Telegram premium uploader login.
+- /session_code <code>: Submit Telegram login code.
+- /session_password <password>: Submit Telegram 2FA password if required.
+- /settings: Open upload settings panel.
+- /direct <url> [--rename <name>] [--prefix <value>] [--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>]
+- /rename [--rename <name>] [--prefix <value>] [--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>] (reply to a media message)
+
+## Telegram Media Rename Command
+
+Use `/rename` as a reply to an existing Telegram media message to rename that file and upload it back using the current upload settings.
+
+Supported replied media:
+
+- document
+- video
+- audio
+- photo
+- animation
+- voice
+
+Command format:
+
+```text
+/rename [--rename <name>] [--prefix <value>] [--sub <pattern=>replacement>] [--sub-cs <pattern=>replacement>]
+```
+
+Behavior summary:
+
+- No args: keeps original filename (safe-normalized).
+- `--rename`: sets custom filename stem.
+- `--prefix`: prepends text to stem.
+- `--sub`: regex substitution on stem, case-insensitive by default.
+- `--sub-cs`: case-sensitive regex substitution.
+- Extension is preserved.
+- If media has no filename (for example photos), a sensible name is generated with extension.
+- Duplicate names are suffix-adjusted (` (1)`, ` (2)`, ...).
+- Invalid rename results fall back to safe original filename.
+- Temporary files are cleaned up on success or failure.
+
+Examples:
+
+```text
+/rename
+/rename --rename "Episode 04"
+/rename --prefix "[MyTag] "
+/rename --sub "S01E04=>S01E04 [WEB]"
+/rename --sub-cs "WEB=>Web"
 ```
 
 ## Notes

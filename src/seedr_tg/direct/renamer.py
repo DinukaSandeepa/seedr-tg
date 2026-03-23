@@ -47,7 +47,7 @@ class FilenameRenamer:
         if request.explicit_name:
             explicit_safe = self.sanitize_filename(request.explicit_name, fallback="")
             explicit_stem, _ = self._split_name(explicit_safe)
-            if explicit_stem:
+            if self._is_meaningful_stem(explicit_stem):
                 stem = explicit_stem
 
         if request.prefix:
@@ -63,7 +63,7 @@ class FilenameRenamer:
                 continue
 
         stem = self._sanitize_fragment(stem)
-        if not stem:
+        if not self._is_meaningful_stem(stem):
             stem = original_stem
 
         normalized_name = self._limit_bytes(f"{stem}{extension}")
@@ -135,6 +135,12 @@ class FilenameRenamer:
         if len(limited.encode("utf-8")) <= self._max_filename_bytes:
             return limited
         return self._truncate_utf8(value, self._max_filename_bytes)
+
+    @staticmethod
+    def _is_meaningful_stem(value: str) -> bool:
+        if not value:
+            return False
+        return any(ch.isalnum() for ch in value)
 
     @staticmethod
     def _truncate_utf8(text: str, max_bytes: int) -> str:

@@ -15,6 +15,7 @@ from seedr_tg.direct.telegram_uploader import DirectTelegramUploader
 from seedr_tg.logging import configure_logging
 from seedr_tg.seedr.client import SeedrService
 from seedr_tg.telegram.bot_app import TelegramBotApp
+from seedr_tg.telegram.media_rename import TelegramMediaRenameHandler
 from seedr_tg.telegram.uploader import TelegramUploader
 from seedr_tg.web.api import WebApiConfig, WebApiServer
 from seedr_tg.worker.queue_runner import QueueRunner
@@ -112,6 +113,13 @@ async def run() -> None:
         download_root=settings.download_root,
         allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
     )
+    media_rename_handler = TelegramMediaRenameHandler(
+        uploader=uploader,
+        repository=repository,
+        renamer=direct_renamer,
+        download_root=settings.download_root,
+        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+    )
 
     bot_app = TelegramBotApp(
         token=settings.telegram_bot_token,
@@ -130,6 +138,7 @@ async def run() -> None:
         update_upload_settings_callback=update_upload_settings_callback,
         reset_upload_settings_callback=reset_upload_settings_callback,
         direct_download_handler=direct_handler.handle,
+        telegram_media_rename_handler=media_rename_handler.handle,
     )
     queue_runner = QueueRunner(
         settings=settings,
