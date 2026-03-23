@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     upload_governor_enabled: bool = True
     upload_governor_min_concurrency: int = 1
     upload_governor_scale_up_after_stable_files: int = 6
+    upload_hybrid_mode: bool = True
+    upload_split_enabled: bool = True
+    upload_split_size_bytes: int = 1_992_294_400
+    upload_split_use_ffmpeg_for_video: bool = True
+    upload_split_ffmpeg_binary: str = "ffmpeg"
+    upload_split_ffprobe_binary: str = "ffprobe"
     use_uvloop: bool = True
     use_aria2_downloads: bool = True
     aria2_binary: str = "aria2c"

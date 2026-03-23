@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import random
 import re
+import shutil
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from html import escape
@@ -33,6 +36,12 @@ from seedr_tg.db.models import (
     UploadSettings,
 )
 from seedr_tg.db.repository import JobRepository
+from seedr_tg.status.template import (
+    format_speed_bps,
+    get_progress_bar_string,
+    readable_size,
+    readable_time,
+)
 
 LOGGER = logging.getLogger(__name__)
 _TELEGRAM_FILENAME_MAX_BYTES = 255
@@ -57,18 +66,43 @@ class TelegramCodeInvalidError(RuntimeError):
     pass
 
 
+class TelegramUploadTooLargeError(RuntimeError):
+    pass
+
+
 class TelegramUploader:
     _UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.0
     _UPLOAD_RETRY_MAX_DELAY_SECONDS = 30.0
     _UPLOAD_GOVERNOR_ENABLED = True
     _UPLOAD_GOVERNOR_MIN_CONCURRENCY = 1
     _UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES = 6
-    _BOT_API_FILE_SIZE_LIMIT_BYTES = 50 * 1024 * 1024
+    _BOT_API_FILE_SIZE_LIMIT_BYTES = 2000 * 1024 * 1024
+    _MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES = 2000 * 1024 * 1024
+    _MTPROTO_PREMIUM_FILE_SIZE_LIMIT_BYTES = 4000 * 1024 * 1024
     _BOT_CONNECT_TIMEOUT_SECONDS = 30.0
     _BOT_POOL_TIMEOUT_SECONDS = 30.0
     _BOT_WRITE_TIMEOUT_SECONDS = 900.0
     _BOT_READ_TIMEOUT_SECONDS = 900.0
     _MTD_DOWNLOAD_TIMEOUT_SECONDS = 1800.0
+    _MTPROTO_UPLOAD_FILE_SIZE_LIMIT_BYTES = 2000 * 1024 * 1024
+    _UPLOAD_SPLIT_ENABLED = True
+    _UPLOAD_SPLIT_SIZE_BYTES = 1900 * 1024 * 1024
+    _UPLOAD_SPLIT_USE_FFMPEG_FOR_VIDEO = True
+    _UPLOAD_SPLIT_FFMPEG_BINARY = "ffmpeg"
+    _UPLOAD_SPLIT_FFPROBE_BINARY = "ffprobe"
+    _UPLOAD_HYBRID_MODE = True
+    _FLOOD_WAIT_SAFETY_MULTIPLIER = 1.08
+    _VIDEO_EXTENSIONS = {
+        ".mp4",
+        ".mkv",
+        ".mov",
+        ".webm",
+        ".avi",
+        ".m4v",
+        ".ts",
+        ".m2ts",
+    }
+    _SPLIT_IO_CHUNK_BYTES = 8 * 1024 * 1024
 
     def _create_client(
         self,
@@ -103,6 +137,12 @@ class TelegramUploader:
         upload_governor_enabled: bool | None = None,
         upload_governor_min_concurrency: int | None = None,
         upload_governor_scale_up_after_stable_files: int | None = None,
+        upload_hybrid_mode: bool | None = None,
+        upload_split_enabled: bool | None = None,
+        upload_split_size_bytes: int | None = None,
+        upload_split_use_ffmpeg_for_video: bool | None = None,
+        upload_split_ffmpeg_binary: str | None = None,
+        upload_split_ffprobe_binary: str | None = None,
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
@@ -138,6 +178,37 @@ class TelegramUploader:
             if upload_governor_scale_up_after_stable_files is not None
             else self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES,
         )
+        self._upload_hybrid_mode = (
+            bool(upload_hybrid_mode)
+            if upload_hybrid_mode is not None
+            else self._UPLOAD_HYBRID_MODE
+        )
+        self._upload_split_enabled = (
+            bool(upload_split_enabled)
+            if upload_split_enabled is not None
+            else self._UPLOAD_SPLIT_ENABLED
+        )
+        self._upload_split_size_bytes = max(
+            64 * 1024 * 1024,
+            int(upload_split_size_bytes)
+            if upload_split_size_bytes is not None
+            else self._UPLOAD_SPLIT_SIZE_BYTES,
+        )
+        self._upload_split_use_ffmpeg_for_video = (
+            bool(upload_split_use_ffmpeg_for_video)
+            if upload_split_use_ffmpeg_for_video is not None
+            else self._UPLOAD_SPLIT_USE_FFMPEG_FOR_VIDEO
+        )
+        self._upload_split_ffmpeg_binary = (
+            str(upload_split_ffmpeg_binary).strip()
+            if upload_split_ffmpeg_binary
+            else self._UPLOAD_SPLIT_FFMPEG_BINARY
+        )
+        self._upload_split_ffprobe_binary = (
+            str(upload_split_ffprobe_binary).strip()
+            if upload_split_ffprobe_binary
+            else self._UPLOAD_SPLIT_FFPROBE_BINARY
+        )
         self._client: Client | None = None
         self._bot_mtproto_client: Client | None = None
         self._pending_login_client: Client | None = None
@@ -147,6 +218,7 @@ class TelegramUploader:
         self._mtproto_download_lock = asyncio.Lock()
         self._adaptive_upload_cap: int | None = None
         self._stable_upload_streak = 0
+        self._user_is_premium: bool | None = None
 
     @staticmethod
     def _parse_bot_user_id(bot_token: str) -> int | None:
@@ -166,6 +238,14 @@ class TelegramUploader:
         if is_private_chat or bot_chat_id > 0:
             return self._bot_user_id
         return bot_chat_id
+
+    @property
+    def mtproto_upload_file_size_limit_bytes(self) -> int:
+        return int(self._MTPROTO_UPLOAD_FILE_SIZE_LIMIT_BYTES)
+
+    @property
+    def mtproto_premium_file_size_limit_bytes(self) -> int:
+        return int(self._MTPROTO_PREMIUM_FILE_SIZE_LIMIT_BYTES)
 
     async def start(self) -> None:
         if self._bot is None:
@@ -453,9 +533,9 @@ class TelegramUploader:
                 message_for_download = message
                 try:
                     saved_path = await self._call_with_mtproto_flood_wait_retry(
-                        lambda: asyncio.wait_for(
+                        lambda media=message_for_download: asyncio.wait_for(
                             client.download_media(
-                                message_for_download,
+                                media,
                                 file_name=str(destination),
                                 progress=on_download_progress,
                             ),
@@ -530,10 +610,11 @@ class TelegramUploader:
                     1,
                     int(getattr(exc, "value", getattr(exc, "x", getattr(exc, "seconds", 1)))),
                 )
+                wait_seconds = max(1.0, float(wait_seconds) * self._FLOOD_WAIT_SAFETY_MULTIPLIER)
                 if attempt >= attempts:
                     raise
                 LOGGER.warning(
-                    "MTProto flood wait during %s; retrying in %ss (attempt %s/%s)",
+                    "MTProto flood wait during %s; retrying in %.2fs (attempt %s/%s)",
                     context,
                     wait_seconds,
                     attempt,
@@ -615,20 +696,26 @@ class TelegramUploader:
         progress_lock = asyncio.Lock()
         completed_files = 0
         loop = asyncio.get_running_loop()
+        premium_available = await self._is_premium_user_session_available()
 
         async def upload_one(file_path: Path) -> None:
             nonlocal completed_files
             last_emit = 0.0
+            speed_prev_at: float | None = None
+            speed_prev_bytes = 0
             progress_emit_task: asyncio.Task[None] | None = None
             telegram_filename = self._build_telegram_filename(file_path.name)
+            split_temp_dir: Path | None = None
 
             def on_progress(
                 current: int,
                 total: int,
                 *,
                 current_name: str = telegram_filename,
+                base_offset: int = 0,
+                total_size: int | None = None,
             ) -> None:
-                nonlocal last_emit, progress_emit_task
+                nonlocal last_emit, progress_emit_task, speed_prev_at, speed_prev_bytes
                 if progress_hook is None:
                     return
                 now = time.monotonic()
@@ -642,15 +729,32 @@ class TelegramUploader:
                 ):
                     return
 
+                aggregate_total = int(total_size or total)
+                aggregate_current = int(max(0, min(aggregate_total, base_offset + current)))
+                speed_bps = 0.0
+                if speed_prev_at is not None:
+                    delta_t = now - speed_prev_at
+                    delta_b = max(0, aggregate_current - speed_prev_bytes)
+                    if delta_t > 0:
+                        speed_bps = float(delta_b) / float(delta_t)
+                speed_prev_at = now
+                speed_prev_bytes = aggregate_current
+                detail = self._format_upload_progress_detail(
+                    name=current_name,
+                    processed_bytes=aggregate_current,
+                    total_bytes=aggregate_total,
+                    speed_bps=speed_bps,
+                )
+
                 async def emit() -> None:
                     async with progress_lock:
                         done = completed_files
                     await progress_hook(
                         done,
                         total_files,
-                        f"{current_name} {current}/{total}",
-                        int(current),
-                        int(total),
+                        detail,
+                        aggregate_current,
+                        aggregate_total,
                     )
 
                 def schedule_emit() -> None:
@@ -681,44 +785,144 @@ class TelegramUploader:
                 "supports_streaming": True,
                 "progress_callback": on_progress,
             }
+            file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
+            if file_size_bytes <= 0:
+                raise RuntimeError(f"Refusing to upload empty file: {file_path}")
 
-            async with semaphore:
-                file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
-                if file_size_bytes <= 0:
-                    raise RuntimeError(
-                        f"Refusing to upload empty file: {file_path}"
-                    )
-                use_client_session = file_size_bytes > self._BOT_API_FILE_SIZE_LIMIT_BYTES
-                if use_client_session:
-                    client = await self._get_client()
-                    had_flood_wait, retry_count = await self._send_file_with_retry(
-                        client,
-                        upload_payload,
-                        upload_max_retries=upload_max_retries,
-                    )
+            upload_targets: list[tuple[Path, int, str]] = []
+            effective_user_limit = (
+                self._MTPROTO_PREMIUM_FILE_SIZE_LIMIT_BYTES
+                if premium_available
+                else self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES
+            )
+
+            if (
+                self._upload_hybrid_mode
+                and file_size_bytes > self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES
+            ):
+                if premium_available and file_size_bytes <= effective_user_limit:
+                    upload_targets = [(file_path, 0, telegram_filename)]
                 else:
-                    had_flood_wait, retry_count = await self._send_file_via_bot_with_retry(
+                    if not self._upload_split_enabled:
+                        max_mib = self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES / (1024 * 1024)
+                        actual_mib = file_size_bytes / (1024 * 1024)
+                        raise TelegramUploadTooLargeError(
+                            "File is too large for non-premium upload and splitting is "
+                            f"disabled ({actual_mib:.2f} MiB > {max_mib:.0f} MiB)."
+                        )
+                    split_cap = min(
+                        max(64 * 1024 * 1024, int(self._upload_split_size_bytes)),
+                        self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES,
+                    )
+                    split_temp_dir = Path(
+                        tempfile.mkdtemp(
+                            prefix=f"split_{file_path.stem}_",
+                            dir=str(file_path.parent),
+                        )
+                    )
+                    split_parts = await self._split_for_upload(
                         file_path=file_path,
-                        caption=caption,
-                        parse_mode=parse_mode,
-                        media_type=(
-                            upload_settings.media_type if upload_settings else UploadMediaType.MEDIA
+                        output_dir=split_temp_dir,
+                        split_size_bytes=split_cap,
+                    )
+                    offset = 0
+                    for index, part_path in enumerate(split_parts, start=1):
+                        upload_targets.append(
+                            (
+                                part_path,
+                                offset,
+                                f"{telegram_filename}.part{index:03d}",
+                            )
+                        )
+                        offset += int(part_path.stat().st_size)
+                    LOGGER.info(
+                        (
+                            "Prepared split upload file=%s parts=%s split_size=%s"
                         ),
-                        thumb_path=thumb_path,
-                        telegram_filename=telegram_filename,
-                        upload_max_retries=upload_max_retries,
-                        progress_hook=progress_hook,
-                        completed_files=completed_files,
-                        total_files=total_files,
+                        file_path,
+                        len(split_parts),
+                        split_cap,
                     )
-                if self._upload_governor_enabled:
-                    await self._record_upload_outcome(
-                        requested_upload_concurrency=requested_upload_concurrency,
-                        upload_governor_min_concurrency=min_upload_concurrency,
-                        upload_governor_scale_up_after_stable_files=self._upload_governor_scale_up_after_stable_files,
-                        had_flood_wait=had_flood_wait,
-                        retry_count=retry_count,
+            else:
+                upload_targets = [(file_path, 0, telegram_filename)]
+
+            try:
+                for target_path, offset_base, target_name in upload_targets:
+                    part_size_bytes = (
+                        target_path.stat().st_size if target_path.exists() else 0
                     )
+                    if part_size_bytes <= 0:
+                        raise RuntimeError(f"Refusing to upload empty part: {target_path}")
+                    use_client_session = False
+                    if self._upload_hybrid_mode:
+                        use_client_session = (
+                            part_size_bytes
+                            > self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES
+                        )
+                    else:
+                        use_client_session = part_size_bytes > self._BOT_API_FILE_SIZE_LIMIT_BYTES
+
+                    async with semaphore:
+                        target_payload = dict(upload_payload)
+                        target_payload["file_path"] = str(target_path)
+                        target_payload["file_name"] = target_name
+                        target_payload["progress_callback"] = self._build_progress_adapter(
+                            on_progress=on_progress,
+                            display_name=telegram_filename,
+                            base_offset=offset_base,
+                            total_size=file_size_bytes,
+                        )
+
+                        if use_client_session:
+                            if part_size_bytes > effective_user_limit:
+                                max_mib = effective_user_limit / (1024 * 1024)
+                                actual_mib = part_size_bytes / (1024 * 1024)
+                                raise TelegramUploadTooLargeError(
+                                    "Split part exceeds active MTProto limit "
+                                    f"({actual_mib:.2f} MiB > {max_mib:.0f} MiB)."
+                                )
+                            client = await self._get_client()
+                            had_flood_wait, retry_count = await self._send_file_with_retry(
+                                client,
+                                target_payload,
+                                upload_max_retries=upload_max_retries,
+                            )
+                        else:
+                            had_flood_wait, retry_count = await self._send_file_via_bot_with_retry(
+                                file_path=target_path,
+                                caption=caption,
+                                parse_mode=parse_mode,
+                                media_type=(
+                                    upload_settings.media_type
+                                    if upload_settings
+                                    else UploadMediaType.MEDIA
+                                ),
+                                thumb_path=thumb_path,
+                                telegram_filename=target_name,
+                                upload_max_retries=upload_max_retries,
+                                progress_hook=None,
+                                completed_files=completed_files,
+                                total_files=total_files,
+                            )
+                            on_progress(
+                                int(min(file_size_bytes, offset_base + part_size_bytes)),
+                                int(file_size_bytes),
+                                current_name=telegram_filename,
+                                base_offset=0,
+                                total_size=file_size_bytes,
+                            )
+
+                        if self._upload_governor_enabled:
+                            await self._record_upload_outcome(
+                                requested_upload_concurrency=requested_upload_concurrency,
+                                upload_governor_min_concurrency=min_upload_concurrency,
+                                upload_governor_scale_up_after_stable_files=self._upload_governor_scale_up_after_stable_files,
+                                had_flood_wait=had_flood_wait,
+                                retry_count=retry_count,
+                            )
+            finally:
+                if split_temp_dir is not None:
+                    await asyncio.to_thread(shutil.rmtree, split_temp_dir, True)
 
             async with progress_lock:
                 completed_files += 1
@@ -788,7 +992,8 @@ class TelegramUploader:
                     1,
                     int(getattr(exc, "value", getattr(exc, "x", getattr(exc, "seconds", 1)))),
                 )
-                LOGGER.warning("Telegram flood wait while uploading; sleeping %ss", wait_seconds)
+                wait_seconds = max(1.0, float(wait_seconds) * self._FLOOD_WAIT_SAFETY_MULTIPLIER)
+                LOGGER.warning("Telegram flood wait while uploading; sleeping %.2fs", wait_seconds)
                 await asyncio.sleep(wait_seconds)
                 if attempt >= max_attempts:
                     raise
@@ -919,7 +1124,8 @@ class TelegramUploader:
             except RetryAfter as exc:
                 had_flood_wait = True
                 wait_seconds = max(1, int(exc.retry_after))
-                LOGGER.warning("Bot API flood wait while uploading; sleeping %ss", wait_seconds)
+                wait_seconds = max(1.0, float(wait_seconds) * self._FLOOD_WAIT_SAFETY_MULTIPLIER)
+                LOGGER.warning("Bot API flood wait while uploading; sleeping %.2fs", wait_seconds)
                 await asyncio.sleep(wait_seconds)
                 if attempt >= max_attempts:
                     raise
@@ -1037,6 +1243,208 @@ class TelegramUploader:
                     "Upload governor increased concurrency to %s after stable uploads",
                     self._adaptive_upload_cap,
                 )
+
+    async def _is_premium_user_session_available(self) -> bool:
+        if self._user_is_premium is not None:
+            return bool(self._user_is_premium)
+        try:
+            client = await self._get_client()
+        except RuntimeError:
+            self._user_is_premium = False
+            return False
+        me = await client.get_me()
+        self._user_is_premium = bool(getattr(me, "is_premium", False))
+        LOGGER.info("User session premium=%s", self._user_is_premium)
+        return bool(self._user_is_premium)
+
+    @staticmethod
+    def _format_upload_progress_detail(
+        *,
+        name: str,
+        processed_bytes: int,
+        total_bytes: int,
+        speed_bps: float,
+    ) -> str:
+        total_value = max(1, int(total_bytes))
+        done_value = max(0, min(int(processed_bytes), total_value))
+        percent = (float(done_value) / float(total_value)) * 100.0
+        eta_seconds: int | None = None
+        if speed_bps > 0 and done_value < total_value:
+            eta_seconds = int((total_value - done_value) / speed_bps)
+        eta_text = readable_time(eta_seconds) if eta_seconds is not None else "-"
+        bar = get_progress_bar_string(percent)
+        return (
+            f"{name} {bar} {percent:.2f}% | "
+            f"{readable_size(done_value)} / {readable_size(total_value)} | "
+            f"{format_speed_bps(speed_bps)} | ETA {eta_text}"
+        )
+
+    async def _split_for_upload(
+        self,
+        *,
+        file_path: Path,
+        output_dir: Path,
+        split_size_bytes: int,
+    ) -> list[Path]:
+        if (
+            self._upload_split_use_ffmpeg_for_video
+            and file_path.suffix.lower() in self._VIDEO_EXTENSIONS
+        ):
+            ffmpeg_parts = await self._try_ffmpeg_split(
+                file_path=file_path,
+                output_dir=output_dir,
+                split_size_bytes=split_size_bytes,
+            )
+            if ffmpeg_parts:
+                return ffmpeg_parts
+        return await self._binary_split(
+            file_path=file_path,
+            output_dir=output_dir,
+            split_size_bytes=split_size_bytes,
+        )
+
+    @staticmethod
+    def _build_progress_adapter(
+        *,
+        on_progress: Callable[..., None],
+        display_name: str,
+        base_offset: int,
+        total_size: int,
+    ) -> Callable[[int, int], None]:
+        def callback(current: int, total: int) -> None:
+            on_progress(
+                current,
+                total,
+                current_name=display_name,
+                base_offset=base_offset,
+                total_size=total_size,
+            )
+
+        return callback
+
+    async def _try_ffmpeg_split(
+        self,
+        *,
+        file_path: Path,
+        output_dir: Path,
+        split_size_bytes: int,
+    ) -> list[Path] | None:
+        ffmpeg_bin = shutil.which(self._upload_split_ffmpeg_binary)
+        ffprobe_bin = shutil.which(self._upload_split_ffprobe_binary)
+        if ffmpeg_bin is None or ffprobe_bin is None:
+            return None
+
+        probe = await asyncio.create_subprocess_exec(
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(file_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        probe_stdout, _probe_stderr = await probe.communicate()
+        if probe.returncode != 0:
+            return None
+        try:
+            duration = float(probe_stdout.decode("utf-8").strip())
+        except ValueError:
+            return None
+        if duration <= 0:
+            return None
+
+        source_size = file_path.stat().st_size if file_path.exists() else 0
+        if source_size <= 0:
+            return None
+        bytes_per_second = float(source_size) / float(duration)
+        if bytes_per_second <= 0:
+            return None
+        segment_seconds = max(1, int(math.floor(float(split_size_bytes) / bytes_per_second)))
+
+        pattern = output_dir / f"{file_path.stem}.part%03d{file_path.suffix}"
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_bin,
+            "-y",
+            "-v",
+            "warning",
+            "-i",
+            str(file_path),
+            "-c",
+            "copy",
+            "-map",
+            "0",
+            "-f",
+            "segment",
+            "-segment_time",
+            str(segment_seconds),
+            "-reset_timestamps",
+            "1",
+            str(pattern),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            LOGGER.warning(
+                "ffmpeg split failed for %s (rc=%s): %s %s",
+                file_path,
+                process.returncode,
+                stdout.decode("utf-8", errors="ignore").strip(),
+                stderr.decode("utf-8", errors="ignore").strip(),
+            )
+            return None
+
+        parts = sorted(output_dir.glob(f"{file_path.stem}.part*{file_path.suffix}"))
+        if not parts:
+            return None
+        if any(part.stat().st_size <= 0 for part in parts):
+            return None
+        if any(part.stat().st_size > split_size_bytes for part in parts):
+            LOGGER.warning(
+                "ffmpeg split produced oversize part(s) for %s; falling back to binary split",
+                file_path,
+            )
+            return None
+        return parts
+
+    async def _binary_split(
+        self,
+        *,
+        file_path: Path,
+        output_dir: Path,
+        split_size_bytes: int,
+    ) -> list[Path]:
+        def split_sync() -> list[Path]:
+            parts: list[Path] = []
+            index = 1
+            with file_path.open("rb") as src:
+                while True:
+                    chunk = src.read(split_size_bytes)
+                    if not chunk:
+                        break
+                    part_path = output_dir / f"{file_path.stem}.part{index:03d}{file_path.suffix}"
+                    with part_path.open("wb") as dst:
+                        dst.write(chunk)
+                        remaining = split_size_bytes - len(chunk)
+                        while remaining > 0:
+                            block = src.read(min(remaining, self._SPLIT_IO_CHUNK_BYTES))
+                            if not block:
+                                break
+                            dst.write(block)
+                            remaining -= len(block)
+                    if part_path.stat().st_size <= 0:
+                        raise RuntimeError(f"Empty split part generated: {part_path}")
+                    parts.append(part_path)
+                    index += 1
+            return parts
+
+        parts = await asyncio.to_thread(split_sync)
+        if not parts:
+            raise RuntimeError(f"Failed to split oversized file: {file_path}")
+        return parts
 
     @staticmethod
     def _is_retryable_upload_error(exc: BaseException) -> bool:

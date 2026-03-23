@@ -35,6 +35,15 @@ MTProto uploader backend uses Kurigram (maintained Pyrogram fork).
 
 All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` to keep `.env` minimal.
 
+Hardcoded upload pipeline values:
+
+- `UPLOAD_HYBRID_MODE=true`
+- `UPLOAD_SPLIT_ENABLED=true`
+- `UPLOAD_SPLIT_SIZE_BYTES=1992294400`
+- `UPLOAD_SPLIT_USE_FFMPEG_FOR_VIDEO=true`
+- `UPLOAD_SPLIT_FFMPEG_BINARY=ffmpeg`
+- `UPLOAD_SPLIT_FFPROBE_BINARY=ffprobe`
+
 ## Run (OS-specific)
 
 ### Linux (Ubuntu/Debian)

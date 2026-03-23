@@ -6,6 +6,8 @@ import logging
 import shutil
 import time
 
+from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
+
 from seedr_tg.config import Settings
 from seedr_tg.db.models import FINAL_PHASES, JobPhase, JobRecord
 from seedr_tg.db.repository import JobRepository
@@ -488,16 +490,16 @@ class QueueRunner:
         return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__})"
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
-        await self._bot_app.upsert_queue_status_panel(
-            chat_id=int(job.source_chat_id),
-            force_create=False,
-        )
+        try:
+            await self._bot_app.upsert_queue_status_panel(
+                chat_id=int(job.source_chat_id),
+                force_create=False,
+            )
+        except (RetryAfter, TimedOut, NetworkError, TelegramError, OSError, TimeoutError) as exc:
+            LOGGER.warning("Skipped admin message update due to transient error: %s", exc)
 
     async def _sync_admin_message_best_effort(self, job: JobRecord) -> None:
-        try:
-            await self._sync_admin_message(job)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Skipped admin message update due to transient error: %s", exc)
+        await self._sync_admin_message(job)
 
     def _should_sync_progress(self, job_id: int, phase: JobPhase, percent: float) -> bool:
         if percent >= 100.0:

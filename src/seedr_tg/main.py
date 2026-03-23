@@ -45,6 +45,12 @@ async def run() -> None:
         upload_governor_enabled=settings.upload_governor_enabled,
         upload_governor_min_concurrency=settings.upload_governor_min_concurrency,
         upload_governor_scale_up_after_stable_files=settings.upload_governor_scale_up_after_stable_files,
+        upload_hybrid_mode=settings.upload_hybrid_mode,
+        upload_split_enabled=settings.upload_split_enabled,
+        upload_split_size_bytes=settings.upload_split_size_bytes,
+        upload_split_use_ffmpeg_for_video=settings.upload_split_use_ffmpeg_for_video,
+        upload_split_ffmpeg_binary=settings.upload_split_ffmpeg_binary,
+        upload_split_ffprobe_binary=settings.upload_split_ffprobe_binary,
     )
     await uploader.start()
 
