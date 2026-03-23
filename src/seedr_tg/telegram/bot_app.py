@@ -111,18 +111,18 @@ class TelegramBotApp:
         self._bot_start_time = float(bot_start_time)
         self._authorized_chat_ids: set[int] = {source_chat_id, admin_chat_id}
         self._authorized_chat_lock = asyncio.Lock()
-        self._admin_message_cache: dict[int, tuple[str, int | None]] = {}
-        self._admin_message_locks: dict[int, asyncio.Lock] = {}
+        self._admin_message_cache: dict[tuple[int, int], tuple[str, int | None]] = {}
+        self._admin_message_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._pending_settings_action: dict[int, str] = {}
-        self._status_locks: dict[int, asyncio.Lock] = {}
-        self._queue_status_message_id: int | None = None
-        self._queue_status_filter: StatusFilter = STATUS_FILTER_ACTIVE
-        self._queue_status_page: int = 0
-        self._queue_status_lock = asyncio.Lock()
-        self._queue_status_last_payload: str | None = None
-        self._queue_status_last_update_at = 0.0
-        self._queue_status_cooldown_until = 0.0
-        self._queue_status_last_flood_log_at = 0.0
+        self._status_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._queue_status_message_ids: dict[int, int] = {}
+        self._queue_status_filters: dict[int, StatusFilter] = {}
+        self._queue_status_pages: dict[int, int] = {}
+        self._queue_status_locks: dict[int, asyncio.Lock] = {}
+        self._queue_status_last_payloads: dict[int, str | None] = {}
+        self._queue_status_last_update_ats: dict[int, float] = {}
+        self._queue_status_cooldown_untils: dict[int, float] = {}
+        self._queue_status_last_flood_log_ats: dict[int, float] = {}
         self._active_tasks: dict[str, ActiveTaskSnapshot] = {}
         self._active_tasks_lock = asyncio.Lock()
         self._application = (
@@ -175,7 +175,13 @@ class TelegramBotApp:
         await self._application.stop()
         await self._application.shutdown()
 
-    async def post_admin_message(self, text: str, job_id: int | None = None) -> int:
+    async def post_admin_message(
+        self,
+        text: str,
+        job_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> int:
+        target_chat_id = self._admin_chat_id if chat_id is None else int(chat_id)
         reply_markup = None
         if job_id is not None:
             reply_markup = InlineKeyboardMarkup.from_button(
@@ -186,7 +192,7 @@ class TelegramBotApp:
             attempts += 1
             try:
                 message = await self._application.bot.send_message(
-                    chat_id=self._admin_chat_id,
+                    chat_id=target_chat_id,
                     text=text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup,
@@ -202,7 +208,7 @@ class TelegramBotApp:
                 if attempts >= 3:
                     raise
                 await asyncio.sleep(wait_seconds)
-        self._admin_message_cache[message.message_id] = (text, job_id)
+        self._admin_message_cache[(target_chat_id, message.message_id)] = (text, job_id)
         return message.message_id
 
     async def update_admin_message(
@@ -210,10 +216,13 @@ class TelegramBotApp:
         message_id: int,
         text: str,
         job_id: int | None = None,
+        chat_id: int | None = None,
     ) -> None:
-        lock = self._admin_message_locks.setdefault(message_id, asyncio.Lock())
+        target_chat_id = self._admin_chat_id if chat_id is None else int(chat_id)
+        cache_key = (target_chat_id, message_id)
+        lock = self._admin_message_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
-            cached = self._admin_message_cache.get(message_id)
+            cached = self._admin_message_cache.get(cache_key)
             if cached == (text, job_id):
                 return
             reply_markup = None
@@ -223,14 +232,14 @@ class TelegramBotApp:
                 )
             try:
                 await self._application.bot.edit_message_text(
-                    chat_id=self._admin_chat_id,
+                    chat_id=target_chat_id,
                     message_id=message_id,
                     text=text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup,
                     disable_web_page_preview=True,
                 )
-                self._admin_message_cache[message_id] = (text, job_id)
+                self._admin_message_cache[cache_key] = (text, job_id)
             except RetryAfter as exc:
                 LOGGER.warning(
                     "Telegram flood control on admin message update. message_id=%s retry_after=%s",
@@ -241,7 +250,7 @@ class TelegramBotApp:
                 return
             except BadRequest as exc:
                 if "message is not modified" in str(exc).lower():
-                    self._admin_message_cache[message_id] = (text, job_id)
+                    self._admin_message_cache[cache_key] = (text, job_id)
                     LOGGER.debug("Skipped no-op admin message edit for message_id=%s", message_id)
                     return
                 raise
@@ -277,9 +286,15 @@ class TelegramBotApp:
 
     async def _status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
-        if not await self._ensure_admin(update):
+        chat = update.effective_chat
+        if chat is None:
             return
-        await self.upsert_queue_status_panel(force_create=True)
+        if not await self.is_chat_authorized(chat.id):
+            await update.effective_message.reply_text(
+                "This chat is not authorized. A group admin can run /authorize first."
+            )
+            return
+        await self.upsert_queue_status_panel(chat_id=chat.id, force_create=True)
 
     async def _handle_status_callback(
         self,
@@ -290,8 +305,11 @@ class TelegramBotApp:
         query = update.callback_query
         if query is None:
             return
-        if query.message is None or query.message.chat_id != self._admin_chat_id:
-            await query.answer("Admin only", show_alert=True)
+        if query.message is None:
+            return
+        chat_id = int(query.message.chat_id)
+        if not await self.is_chat_authorized(chat_id):
+            await query.answer("Unauthorized chat", show_alert=True)
             return
         data = query.data or ""
         parts = data.split(":")
@@ -316,10 +334,11 @@ class TelegramBotApp:
         else:
             await query.answer()
 
-        message_id = query.message.message_id
-        lock = self._status_locks.setdefault(message_id, asyncio.Lock())
+        message_id = int(query.message.message_id)
+        lock = self._status_locks.setdefault((chat_id, message_id), asyncio.Lock())
         async with lock:
             payload, keyboard, normalized_filter, normalized_page = await self._render_status_page(
+                chat_id=chat_id,
                 selected_filter=selected_filter,
                 page=page,
             )
@@ -342,25 +361,26 @@ class TelegramBotApp:
                     )
                     return
                 raise
-            self._queue_status_message_id = message_id
-            self._queue_status_filter = normalized_filter
-            self._queue_status_page = normalized_page
-            self._queue_status_last_payload = payload
-            self._queue_status_last_update_at = time.monotonic()
+            self._queue_status_message_ids[chat_id] = message_id
+            self._queue_status_filters[chat_id] = normalized_filter
+            self._queue_status_pages[chat_id] = normalized_page
+            self._queue_status_last_payloads[chat_id] = payload
+            self._queue_status_last_update_ats[chat_id] = time.monotonic()
 
     async def _render_status_page(
         self,
         *,
+        chat_id: int,
         selected_filter: StatusFilter,
         page: int,
     ) -> tuple[str, InlineKeyboardMarkup, StatusFilter, int]:
         jobs = await self._list_jobs_callback()
         async with self._active_tasks_lock:
             active_tasks = list(self._active_tasks.values())
-        filtered_entries = self._filter_entries(jobs, active_tasks, selected_filter)
+        filtered_entries = self._filter_entries(jobs, active_tasks, selected_filter, chat_id)
         if not filtered_entries and selected_filter != STATUS_FILTER_ALL:
             selected_filter = STATUS_FILTER_ALL
-            filtered_entries = self._filter_entries(jobs, active_tasks, selected_filter)
+            filtered_entries = self._filter_entries(jobs, active_tasks, selected_filter, chat_id)
 
         total_items = len(filtered_entries)
         page_count = max(1, (total_items + STATUS_PAGE_SIZE - 1) // STATUS_PAGE_SIZE)
@@ -383,7 +403,13 @@ class TelegramBotApp:
                 safe_page,
             )
 
-        bot_stats = self._build_bot_stats(jobs, active_tasks)
+        visible_jobs = [job for job in jobs if int(job.source_chat_id) == int(chat_id)]
+        visible_tasks = [
+            task
+            for task in active_tasks
+            if self._task_chat_id(task.task_id) == int(chat_id)
+        ]
+        bot_stats = self._build_bot_stats(visible_jobs, visible_tasks)
         bodies = [self._render_status_entry(entry) for entry in window]
         payload = f"{header}\n\n" + "\n\n────────────────\n\n".join(bodies)
         payload += "\n" + self._render_bot_stats_footer(bot_stats)
@@ -394,53 +420,68 @@ class TelegramBotApp:
             safe_page,
         )
 
-    async def upsert_queue_status_panel(self, *, force_create: bool = False) -> None:
-        async with self._queue_status_lock:
+    async def upsert_queue_status_panel(self, *, chat_id: int, force_create: bool = False) -> None:
+        normalized_chat_id = int(chat_id)
+        queue_lock = self._queue_status_locks.setdefault(normalized_chat_id, asyncio.Lock())
+        async with queue_lock:
             jobs = await self._list_jobs_callback()
             async with self._active_tasks_lock:
                 active_tasks = list(self._active_tasks.values())
-            if not force_create and self._all_tasks_completed(jobs, active_tasks):
-                await self._delete_queue_status_message_locked()
+            visible_jobs = [job for job in jobs if int(job.source_chat_id) == normalized_chat_id]
+            visible_tasks = [
+                task
+                for task in active_tasks
+                if self._task_chat_id(task.task_id) == normalized_chat_id
+            ]
+            if not force_create and self._all_tasks_completed(visible_jobs, visible_tasks):
+                await self._delete_queue_status_message_locked(chat_id=normalized_chat_id)
                 return
 
+            selected_filter = self._queue_status_filters.get(normalized_chat_id, STATUS_FILTER_ACTIVE)
+            selected_page = self._queue_status_pages.get(normalized_chat_id, 0)
             payload, keyboard, selected_filter, safe_page = await self._render_status_page(
-                selected_filter=self._queue_status_filter,
-                page=self._queue_status_page,
+                chat_id=normalized_chat_id,
+                selected_filter=selected_filter,
+                page=selected_page,
             )
-            self._queue_status_filter = selected_filter
-            self._queue_status_page = safe_page
+            self._queue_status_filters[normalized_chat_id] = selected_filter
+            self._queue_status_pages[normalized_chat_id] = safe_page
             now = time.monotonic()
 
-            message_id = self._queue_status_message_id
+            message_id = self._queue_status_message_ids.get(normalized_chat_id)
+            last_payload = self._queue_status_last_payloads.get(normalized_chat_id)
+            last_update_at = self._queue_status_last_update_ats.get(normalized_chat_id, 0.0)
+            cooldown_until = self._queue_status_cooldown_untils.get(normalized_chat_id, 0.0)
+            last_flood_log_at = self._queue_status_last_flood_log_ats.get(normalized_chat_id, 0.0)
             if (
                 message_id is not None
-                and payload == self._queue_status_last_payload
+                and payload == last_payload
                 and not force_create
             ):
                 return
-            if message_id is not None and now < self._queue_status_cooldown_until:
+            if message_id is not None and now < cooldown_until:
                 return
             if (
                 message_id is not None
                 and not force_create
-                and (now - self._queue_status_last_update_at) < 2.0
+                and (now - last_update_at) < 2.0
             ):
                 return
             if force_create and message_id is None:
-                posted_id = await self.post_admin_message(payload)
-                self._queue_status_message_id = posted_id
-                self._queue_status_last_payload = payload
-                self._queue_status_last_update_at = time.monotonic()
+                posted_id = await self.post_admin_message(payload, chat_id=normalized_chat_id)
+                self._queue_status_message_ids[normalized_chat_id] = posted_id
+                self._queue_status_last_payloads[normalized_chat_id] = payload
+                self._queue_status_last_update_ats[normalized_chat_id] = time.monotonic()
                 try:
                     await self._application.bot.edit_message_reply_markup(
-                        chat_id=self._admin_chat_id,
+                        chat_id=normalized_chat_id,
                         message_id=posted_id,
                         reply_markup=keyboard,
                     )
                 except Exception:  # noqa: BLE001
                     with contextlib.suppress(Exception):
                         await self._application.bot.edit_message_text(
-                            chat_id=self._admin_chat_id,
+                            chat_id=normalized_chat_id,
                             message_id=posted_id,
                             text=payload,
                             parse_mode=ParseMode.HTML,
@@ -450,13 +491,13 @@ class TelegramBotApp:
                 return
 
             if message_id is None:
-                posted_id = await self.post_admin_message(payload)
-                self._queue_status_message_id = posted_id
-                self._queue_status_last_payload = payload
-                self._queue_status_last_update_at = time.monotonic()
+                posted_id = await self.post_admin_message(payload, chat_id=normalized_chat_id)
+                self._queue_status_message_ids[normalized_chat_id] = posted_id
+                self._queue_status_last_payloads[normalized_chat_id] = payload
+                self._queue_status_last_update_ats[normalized_chat_id] = time.monotonic()
                 with contextlib.suppress(Exception):
                     await self._application.bot.edit_message_text(
-                        chat_id=self._admin_chat_id,
+                        chat_id=normalized_chat_id,
                         message_id=posted_id,
                         text=payload,
                         parse_mode=ParseMode.HTML,
@@ -467,39 +508,41 @@ class TelegramBotApp:
 
             try:
                 await self._application.bot.edit_message_text(
-                    chat_id=self._admin_chat_id,
+                    chat_id=normalized_chat_id,
                     message_id=message_id,
                     text=payload,
                     parse_mode=ParseMode.HTML,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
                 )
-                self._queue_status_last_payload = payload
-                self._queue_status_last_update_at = time.monotonic()
+                self._queue_status_last_payloads[normalized_chat_id] = payload
+                self._queue_status_last_update_ats[normalized_chat_id] = time.monotonic()
             except RetryAfter as exc:
                 wait_seconds = max(1.0, float(exc.retry_after) * 1.08)
-                self._queue_status_cooldown_until = time.monotonic() + wait_seconds
-                if (time.monotonic() - self._queue_status_last_flood_log_at) >= 15.0:
+                self._queue_status_cooldown_untils[normalized_chat_id] = (
+                    time.monotonic() + wait_seconds
+                )
+                if (time.monotonic() - last_flood_log_at) >= 15.0:
                     LOGGER.warning(
                         "Queue status panel rate-limited; cooling down %.2fs",
                         wait_seconds,
                     )
-                    self._queue_status_last_flood_log_at = time.monotonic()
+                    self._queue_status_last_flood_log_ats[normalized_chat_id] = time.monotonic()
                 return
             except BadRequest as exc:
                 text = str(exc).lower()
                 if "message is not modified" in text:
-                    self._queue_status_last_payload = payload
-                    self._queue_status_last_update_at = time.monotonic()
+                    self._queue_status_last_payloads[normalized_chat_id] = payload
+                    self._queue_status_last_update_ats[normalized_chat_id] = time.monotonic()
                     return
                 if "message to edit not found" in text:
-                    posted_id = await self.post_admin_message(payload)
-                    self._queue_status_message_id = posted_id
-                    self._queue_status_last_payload = payload
-                    self._queue_status_last_update_at = time.monotonic()
+                    posted_id = await self.post_admin_message(payload, chat_id=normalized_chat_id)
+                    self._queue_status_message_ids[normalized_chat_id] = posted_id
+                    self._queue_status_last_payloads[normalized_chat_id] = payload
+                    self._queue_status_last_update_ats[normalized_chat_id] = time.monotonic()
                     with contextlib.suppress(Exception):
                         await self._application.bot.edit_message_text(
-                            chat_id=self._admin_chat_id,
+                            chat_id=normalized_chat_id,
                             message_id=posted_id,
                             text=payload,
                             parse_mode=ParseMode.HTML,
@@ -509,28 +552,31 @@ class TelegramBotApp:
                     return
                 if "can't parse entities" in text:
                     await self._application.bot.edit_message_text(
-                        chat_id=self._admin_chat_id,
+                        chat_id=normalized_chat_id,
                         message_id=message_id,
                         text=payload,
                         reply_markup=keyboard,
                         disable_web_page_preview=True,
                     )
-                    self._queue_status_last_payload = payload
-                    self._queue_status_last_update_at = time.monotonic()
+                    self._queue_status_last_payloads[normalized_chat_id] = payload
+                    self._queue_status_last_update_ats[normalized_chat_id] = time.monotonic()
                     return
                 raise
 
-    async def _delete_queue_status_message_locked(self) -> None:
-        message_id = self._queue_status_message_id
-        self._queue_status_message_id = None
-        self._queue_status_last_payload = None
-        self._queue_status_last_update_at = 0.0
-        self._queue_status_cooldown_until = 0.0
+    async def _delete_queue_status_message_locked(self, *, chat_id: int) -> None:
+        normalized_chat_id = int(chat_id)
+        message_id = self._queue_status_message_ids.pop(normalized_chat_id, None)
+        self._queue_status_last_payloads.pop(normalized_chat_id, None)
+        self._queue_status_last_update_ats.pop(normalized_chat_id, None)
+        self._queue_status_cooldown_untils.pop(normalized_chat_id, None)
+        self._queue_status_last_flood_log_ats.pop(normalized_chat_id, None)
+        self._queue_status_pages.pop(normalized_chat_id, None)
+        self._queue_status_filters.pop(normalized_chat_id, None)
         if message_id is None:
             return
         try:
             await self._application.bot.delete_message(
-                chat_id=self._admin_chat_id,
+                chat_id=normalized_chat_id,
                 message_id=message_id,
             )
         except BadRequest as exc:
@@ -566,22 +612,31 @@ class TelegramBotApp:
         jobs: list[JobRecord],
         tasks: list[ActiveTaskSnapshot],
         selected_filter: StatusFilter,
+        chat_id: int,
     ) -> list[JobRecord | ActiveTaskSnapshot]:
-        entries: list[JobRecord | ActiveTaskSnapshot] = [*jobs, *tasks]
+        filtered_jobs = [job for job in jobs if int(job.source_chat_id) == int(chat_id)]
+        filtered_tasks = [
+            task
+            for task in tasks
+            if TelegramBotApp._task_chat_id(task.task_id) == int(chat_id)
+        ]
+        entries: list[JobRecord | ActiveTaskSnapshot] = [*filtered_jobs, *filtered_tasks]
         if selected_filter == STATUS_FILTER_ALL:
             return entries
         if selected_filter == STATUS_FILTER_QUEUED:
-            queued_jobs = [job for job in jobs if job.phase.value == "queued"]
-            queued_tasks = [task for task in tasks if task.phase == "queued"]
+            queued_jobs = [job for job in filtered_jobs if job.phase.value == "queued"]
+            queued_tasks = [task for task in filtered_tasks if task.phase == "queued"]
             return [*queued_jobs, *queued_tasks]
         if selected_filter == STATUS_FILTER_TRANSFERS:
             transfer_phases = {"downloading_seedr", "downloading_local", "uploading_telegram"}
-            transfer_jobs = [job for job in jobs if job.phase.value in transfer_phases]
-            transfer_tasks = [task for task in tasks if task.phase in {"running", "queued"}]
+            transfer_jobs = [job for job in filtered_jobs if job.phase.value in transfer_phases]
+            transfer_tasks = [
+                task for task in filtered_tasks if task.phase in {"running", "queued"}
+            ]
             return [*transfer_jobs, *transfer_tasks]
         final_phases = {"completed", "failed", "canceled"}
-        active_jobs = [job for job in jobs if job.phase.value not in final_phases]
-        active_tasks = [task for task in tasks if task.phase not in final_phases]
+        active_jobs = [job for job in filtered_jobs if job.phase.value not in final_phases]
+        active_tasks = [task for task in filtered_tasks if task.phase not in final_phases]
         return [*active_jobs, *active_tasks]
 
     @staticmethod
@@ -626,18 +681,37 @@ class TelegramBotApp:
     async def register_active_task(self, task: ActiveTaskSnapshot) -> None:
         async with self._active_tasks_lock:
             self._active_tasks[task.task_id] = task
-        await self.upsert_queue_status_panel(force_create=False)
+        chat_id = self._task_chat_id(task.task_id)
+        if chat_id is None:
+            return
+        await self.upsert_queue_status_panel(chat_id=chat_id, force_create=False)
 
     async def update_active_task(self, task: ActiveTaskSnapshot) -> None:
         async with self._active_tasks_lock:
             if task.task_id in self._active_tasks:
                 self._active_tasks[task.task_id] = task
-        await self.upsert_queue_status_panel(force_create=False)
+        chat_id = self._task_chat_id(task.task_id)
+        if chat_id is None:
+            return
+        await self.upsert_queue_status_panel(chat_id=chat_id, force_create=False)
 
     async def unregister_active_task(self, task_id: str) -> None:
         async with self._active_tasks_lock:
             self._active_tasks.pop(task_id, None)
-        await self.upsert_queue_status_panel(force_create=False)
+        chat_id = self._task_chat_id(task_id)
+        if chat_id is None:
+            return
+        await self.upsert_queue_status_panel(chat_id=chat_id, force_create=False)
+
+    @staticmethod
+    def _task_chat_id(task_id: str) -> int | None:
+        parts = str(task_id).split(":")
+        if len(parts) < 3:
+            return None
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
 
     @staticmethod
     def _status_keyboard(

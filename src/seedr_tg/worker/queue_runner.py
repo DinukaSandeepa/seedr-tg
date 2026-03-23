@@ -488,8 +488,10 @@ class QueueRunner:
         return f"{exc.__class__.__name__} (caused by {cause.__class__.__name__})"
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
-        del job
-        await self._bot_app.upsert_queue_status_panel(force_create=False)
+        await self._bot_app.upsert_queue_status_panel(
+            chat_id=int(job.source_chat_id),
+            force_create=False,
+        )
 
     async def _sync_admin_message_best_effort(self, job: JobRecord) -> None:
         try:
@@ -588,6 +590,9 @@ class QueueRunner:
                 file_names=file_names,
                 failure_reason=job.failure_reason,
             )
-            await self._bot_app.post_admin_message(text)
+            await self._bot_app.post_admin_message(
+                text,
+                chat_id=int(job.source_chat_id),
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to post task outcome summary for job %s: %s", job.id, exc)
