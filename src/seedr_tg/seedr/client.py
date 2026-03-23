@@ -12,6 +12,7 @@ from typing import Any
 import aiofiles
 import httpx
 from seedrcc import AsyncSeedr, Token
+from seedrcc.exceptions import APIError
 from seedrcc.models import Folder, Torrent, TorrentProgress
 
 from seedr_tg.config import Settings
@@ -107,8 +108,33 @@ class SeedrService:
 
     async def add_magnet(self, magnet_link: str) -> int | None:
         client = await self._get_client()
-        result = await client.add_torrent(magnet_link=magnet_link)
-        return result.user_torrent_id
+        try:
+            result = await client.add_torrent(magnet_link=magnet_link)
+            return result.user_torrent_id
+        except APIError as exc:
+            if not self._is_storage_related_api_error(exc):
+                raise
+            LOGGER.warning(
+                (
+                    "Seedr add_torrent failed due to storage/quota limit. "
+                    "Attempting automatic cleanup before retry. error=%s"
+                ),
+                exc,
+            )
+            deleted_count = await self._cleanup_seedr_storage(exclude_active_jobs=True)
+            if deleted_count <= 0:
+                LOGGER.warning(
+                    "Seedr cleanup did not remove removable artifacts; "
+                    "add_torrent retry skipped"
+                )
+                raise
+            await asyncio.sleep(0.6)
+            result = await client.add_torrent(magnet_link=magnet_link)
+            LOGGER.info(
+                "Seedr add_torrent succeeded after cleanup retry; removed_items=%s",
+                deleted_count,
+            )
+            return result.user_torrent_id
 
     async def resolve_torrent(
         self,
@@ -464,3 +490,89 @@ class SeedrService:
         if len(folders) != 1:
             return None
         return folders[0]
+
+    @staticmethod
+    def _is_storage_related_api_error(exc: APIError) -> bool:
+        message = str(exc).lower()
+        if any(
+            token in message
+            for token in (
+                "storage",
+                "not enough",
+                "insufficient",
+                "quota",
+                "full",
+                "space",
+                "limit",
+            )
+        ):
+            return True
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code in {507, 509}:
+            return True
+        code = getattr(exc, "code", None)
+        # Seedr API codes can vary; this catches the common storage-limit family.
+        if isinstance(code, int) and code in {9, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
+            return True
+        return False
+
+    async def _cleanup_seedr_storage(self, *, exclude_active_jobs: bool) -> int:
+        client = await self._get_client()
+        protected_torrent_ids: set[str] = set()
+        protected_folder_ids: set[str] = set()
+        if exclude_active_jobs:
+            active_jobs = await self._repository.list_jobs(include_final=False)
+            protected_torrent_ids = {
+                str(job.seedr_torrent_id)
+                for job in active_jobs
+                if job.seedr_torrent_id is not None
+            }
+            protected_folder_ids = {
+                str(job.seedr_folder_id)
+                for job in active_jobs
+                if job.seedr_folder_id is not None
+            }
+
+        contents = await client.list_contents()
+        torrents = sorted(
+            [item for item in contents.torrents if str(item.id) not in protected_torrent_ids],
+            key=lambda item: int(item.id),
+        )
+        folders = sorted(
+            [item for item in contents.folders if str(item.id) not in protected_folder_ids],
+            key=lambda item: int(item.id),
+        )
+
+        deleted = 0
+        for torrent in torrents:
+            try:
+                await client.delete_torrent(str(torrent.id))
+                deleted += 1
+                LOGGER.info("Seedr cleanup removed torrent id=%s name=%s", torrent.id, torrent.name)
+            except (APIError, OSError, RuntimeError) as cleanup_exc:
+                LOGGER.warning(
+                    "Seedr cleanup skipped torrent id=%s due to error: %s",
+                    torrent.id,
+                    cleanup_exc,
+                )
+
+        for folder in folders:
+            try:
+                await client.delete_folder(str(folder.id))
+                deleted += 1
+                LOGGER.info("Seedr cleanup removed folder id=%s name=%s", folder.id, folder.name)
+            except (APIError, OSError, RuntimeError) as cleanup_exc:
+                LOGGER.warning(
+                    "Seedr cleanup skipped folder id=%s due to error: %s",
+                    folder.id,
+                    cleanup_exc,
+                )
+
+        LOGGER.info(
+            "Seedr cleanup summary: deleted=%s protected_torrents=%s protected_folders=%s",
+            deleted,
+            len(protected_torrent_ids),
+            len(protected_folder_ids),
+        )
+        return deleted
