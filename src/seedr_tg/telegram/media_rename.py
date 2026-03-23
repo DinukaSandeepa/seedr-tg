@@ -54,7 +54,7 @@ class TelegramMediaRenameHandler:
         repository: JobRepository,
         renamer: FilenameRenamer,
         download_root: Path,
-        allowed_chat_ids: set[int],
+        is_chat_allowed_callback: Callable[[int], Awaitable[bool]],
         bot_start_time: float,
         max_concurrent_tasks: int = 2,
         register_active_task_callback: (
@@ -69,7 +69,7 @@ class TelegramMediaRenameHandler:
         self._repository = repository
         self._renamer = renamer
         self._download_root = download_root
-        self._allowed_chat_ids = set(allowed_chat_ids)
+        self._is_chat_allowed_callback = is_chat_allowed_callback
         self._bot_start_time = float(bot_start_time)
         self._task_semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
         self._register_active_task_callback = register_active_task_callback
@@ -86,7 +86,7 @@ class TelegramMediaRenameHandler:
         )
         if message is None or chat is None:
             return
-        if chat.id not in self._allowed_chat_ids:
+        if not await self._is_chat_allowed_callback(chat.id):
             await message.reply_text("This command is not enabled for this chat.")
             return
         if message.reply_to_message is None:

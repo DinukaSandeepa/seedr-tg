@@ -110,6 +110,12 @@ async def run() -> None:
     async def reset_upload_settings_callback():
         return await repository.reset_upload_settings()
 
+    async def get_authorized_chat_ids_callback():
+        return await repository.get_authorized_chat_ids()
+
+    async def authorize_chat_callback(chat_id: int):
+        return await repository.authorize_chat_id(chat_id)
+
     direct_handler: DirectDownloadCommandHandler | None = None
     media_rename_handler: TelegramMediaRenameHandler | None = None
 
@@ -149,6 +155,8 @@ async def run() -> None:
         get_upload_settings_callback=get_upload_settings_callback,
         update_upload_settings_callback=update_upload_settings_callback,
         reset_upload_settings_callback=reset_upload_settings_callback,
+        get_authorized_chat_ids_callback=get_authorized_chat_ids_callback,
+        authorize_chat_callback=authorize_chat_callback,
         direct_download_handler=direct_download_handler,
         telegram_media_rename_handler=telegram_media_rename_handler,
         status_download_dir=settings.download_root,
@@ -160,7 +168,7 @@ async def run() -> None:
         uploader=direct_uploader,
         repository=repository,
         download_root=settings.download_root,
-        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+        is_chat_allowed_callback=bot_app.is_chat_authorized,
         bot_start_time=bot_start_time,
         register_active_task_callback=bot_app.register_active_task,
         update_active_task_callback=bot_app.update_active_task,
@@ -171,7 +179,7 @@ async def run() -> None:
         repository=repository,
         renamer=direct_renamer,
         download_root=settings.download_root,
-        allowed_chat_ids={settings.telegram_source_chat_id, settings.telegram_admin_chat_id},
+        is_chat_allowed_callback=bot_app.is_chat_authorized,
         bot_start_time=bot_start_time,
         max_concurrent_tasks=settings.rename_concurrency,
         register_active_task_callback=bot_app.register_active_task,

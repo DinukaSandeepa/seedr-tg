@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatType
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
@@ -80,6 +81,8 @@ class TelegramBotApp:
         get_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
         update_upload_settings_callback: Callable[..., Awaitable[UploadSettings]],
         reset_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
+        get_authorized_chat_ids_callback: Callable[[], Awaitable[set[int]]],
+        authorize_chat_callback: Callable[[int], Awaitable[set[int]]],
         direct_download_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
         telegram_media_rename_handler: Callable[
             [Update, ContextTypes.DEFAULT_TYPE],
@@ -102,8 +105,12 @@ class TelegramBotApp:
         self._get_upload_settings_callback = get_upload_settings_callback
         self._update_upload_settings_callback = update_upload_settings_callback
         self._reset_upload_settings_callback = reset_upload_settings_callback
+        self._get_authorized_chat_ids_callback = get_authorized_chat_ids_callback
+        self._authorize_chat_callback = authorize_chat_callback
         self._status_download_dir = status_download_dir
         self._bot_start_time = float(bot_start_time)
+        self._authorized_chat_ids: set[int] = {source_chat_id, admin_chat_id}
+        self._authorized_chat_lock = asyncio.Lock()
         self._admin_message_cache: dict[int, tuple[str, int | None]] = {}
         self._admin_message_locks: dict[int, asyncio.Lock] = {}
         self._pending_settings_action: dict[int, str] = {}
@@ -130,6 +137,7 @@ class TelegramBotApp:
         self._application.add_handler(CommandHandler("session_start", self._session_start))
         self._application.add_handler(CommandHandler("session_code", self._session_code))
         self._application.add_handler(CommandHandler("session_password", self._session_password))
+        self._application.add_handler(CommandHandler("authorize", self._authorize_group_chat))
         self._application.add_handler(CommandHandler("direct", direct_download_handler))
         self._application.add_handler(CommandHandler("rename", telegram_media_rename_handler))
         self._application.add_handler(CommandHandler("settings", self._settings))
@@ -143,7 +151,7 @@ class TelegramBotApp:
             CallbackQueryHandler(self._handle_status_callback, pattern=r"^status:")
         )
         self._application.add_handler(
-            MessageHandler(filters.Chat(chat_id=source_chat_id) & filters.TEXT, self._on_message)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
         self._application.add_handler(
             MessageHandler(
@@ -155,6 +163,7 @@ class TelegramBotApp:
         )
 
     async def start(self) -> None:
+        await self._refresh_authorized_chat_ids()
         await self._application.initialize()
         await self._application.start()
         await self._application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
@@ -245,6 +254,11 @@ class TelegramBotApp:
             return
         magnet = self._extract_magnet(message.text or "")
         if magnet is None:
+            return
+        if not await self.is_chat_authorized(chat.id):
+            await message.reply_text(
+                "This chat is not authorized. A group admin can run /authorize first."
+            )
             return
         user = update.effective_user
         job = await self._enqueue_callback(
@@ -759,6 +773,50 @@ class TelegramBotApp:
             return
         await update.effective_message.reply_text(self._format_session_success(session))
 
+    async def _authorize_group_chat(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        message = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if message is None or chat is None or user is None:
+            return
+        if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+            await message.reply_text("Use /authorize inside a group chat.")
+            return
+
+        try:
+            bot_user = await self._application.bot.get_me()
+            bot_member = await self._application.bot.get_chat_member(chat.id, bot_user.id)
+            requester_member = await self._application.bot.get_chat_member(chat.id, user.id)
+        except BadRequest as exc:
+            await message.reply_text(f"Authorization check failed: {exc}")
+            return
+
+        if not self._is_admin_member_status(str(bot_member.status)):
+            await message.reply_text(
+                "I must be an admin in this group before authorization can be enabled."
+            )
+            return
+
+        if not self._is_admin_member_status(str(requester_member.status)):
+            await message.reply_text("Only a group admin can run /authorize.")
+            return
+
+        authorized_ids = await self._authorize_chat_callback(chat.id)
+        async with self._authorized_chat_lock:
+            self._authorized_chat_ids = {
+                self._source_chat_id,
+                self._admin_chat_id,
+                *authorized_ids,
+            }
+        await message.reply_text(
+            "Group authorized. Any user in this group can now use bot commands here."
+        )
+
     async def _session_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._ensure_admin(update):
             return
@@ -962,6 +1020,24 @@ class TelegramBotApp:
             return True
         await message.reply_text("This command is only available in the configured admin chat.")
         return False
+
+    async def _refresh_authorized_chat_ids(self) -> None:
+        authorized_ids = await self._get_authorized_chat_ids_callback()
+        async with self._authorized_chat_lock:
+            self._authorized_chat_ids = {
+                self._source_chat_id,
+                self._admin_chat_id,
+                *authorized_ids,
+            }
+
+    async def is_chat_authorized(self, chat_id: int) -> bool:
+        async with self._authorized_chat_lock:
+            return int(chat_id) in self._authorized_chat_ids
+
+    @staticmethod
+    def _is_admin_member_status(status: str) -> bool:
+        normalized_status = str(status).lower().strip()
+        return normalized_status in {"administrator", "creator"}
 
     @staticmethod
     def _format_session_success(session: TelegramUserSession) -> str:

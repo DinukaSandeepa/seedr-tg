@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import asdict, fields
 from typing import Any
 
@@ -385,6 +386,34 @@ class JobRepository:
         async with self._write_lock:
             await self._state.delete_one({"_id": "upload_settings"})
         return await self.get_upload_settings()
+
+    async def get_authorized_chat_ids(self) -> set[int]:
+        row = await self._state.find_one(
+            {"_id": "authorized_chats"},
+            projection={"chat_ids": True},
+        )
+        if row is None:
+            return set()
+        raw_chat_ids = row.get("chat_ids") or []
+        authorized: set[int] = set()
+        for raw_chat_id in raw_chat_ids:
+            with contextlib.suppress(TypeError, ValueError):
+                authorized.add(int(raw_chat_id))
+        return authorized
+
+    async def authorize_chat_id(self, chat_id: int) -> set[int]:
+        normalized_chat_id = int(chat_id)
+        async with self._write_lock:
+            await self._state.update_one(
+                {"_id": "authorized_chats"},
+                {
+                    "$addToSet": {"chat_ids": normalized_chat_id},
+                    "$set": {"updated_at": utc_now()},
+                    "$setOnInsert": {"created_at": utc_now()},
+                },
+                upsert=True,
+            )
+        return await self.get_authorized_chat_ids()
 
     @staticmethod
     def _to_record(row: dict[str, Any]) -> JobRecord:
