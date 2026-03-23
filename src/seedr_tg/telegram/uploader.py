@@ -83,6 +83,7 @@ class TelegramUploader:
             "api_hash": self._api_hash,
             "in_memory": in_memory,
             "no_updates": True,
+            "sleep_threshold": 0,
         }
         if session_string:
             kwargs["session_string"] = session_string
@@ -143,6 +144,7 @@ class TelegramUploader:
         self._pending_login_phone_number: str | None = None
         self._bot: Bot | None = None
         self._governor_lock = asyncio.Lock()
+        self._mtproto_download_lock = asyncio.Lock()
         self._adaptive_upload_cap: int | None = None
         self._stable_upload_streak = 0
 
@@ -333,51 +335,54 @@ class TelegramUploader:
         user_client = await self._get_client()
         clients_to_try.append(("user", user_client, int(chat_id)))
 
-        last_error: Exception | None = None
-        for client_kind, client, effective_chat_id in clients_to_try:
-            try:
-                LOGGER.info(
-                    (
-                        "MTProto media download attempt started via %s client "
-                        "chat_id=%s message_id=%s"
-                    ),
-                    client_kind,
-                    effective_chat_id,
-                    message_id,
-                )
-                started_at = time.monotonic()
-                downloaded = await self._download_media_with_client(
-                    client=client,
-                    chat_id=effective_chat_id,
-                    message_id=message_id,
-                    destination=destination,
-                    fallback_file_id=fallback_file_id,
-                    progress_hook=progress_hook,
-                )
-                elapsed = time.monotonic() - started_at
-                LOGGER.info(
-                    (
-                        "MTProto media download attempt completed via %s client "
-                        "chat_id=%s message_id=%s elapsed=%.2fs"
-                    ),
-                    client_kind,
-                    effective_chat_id,
-                    message_id,
-                    elapsed,
-                )
-                return downloaded
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                LOGGER.warning(
-                    (
-                        "MTProto media download attempt failed via %s client "
-                        "chat_id=%s message_id=%s error=%s"
-                    ),
-                    client_kind,
-                    effective_chat_id,
-                    message_id,
-                    exc,
-                )
+        # Keep MTProto media pulls serialized so parallel /rename requests do not
+        # trigger repeated flood waits from upload.GetFile.
+        async with self._mtproto_download_lock:
+            last_error: Exception | None = None
+            for client_kind, client, effective_chat_id in clients_to_try:
+                try:
+                    LOGGER.info(
+                        (
+                            "MTProto media download attempt started via %s client "
+                            "chat_id=%s message_id=%s"
+                        ),
+                        client_kind,
+                        effective_chat_id,
+                        message_id,
+                    )
+                    started_at = time.monotonic()
+                    downloaded = await self._download_media_with_client(
+                        client=client,
+                        chat_id=effective_chat_id,
+                        message_id=message_id,
+                        destination=destination,
+                        fallback_file_id=fallback_file_id,
+                        progress_hook=progress_hook,
+                    )
+                    elapsed = time.monotonic() - started_at
+                    LOGGER.info(
+                        (
+                            "MTProto media download attempt completed via %s client "
+                            "chat_id=%s message_id=%s elapsed=%.2fs"
+                        ),
+                        client_kind,
+                        effective_chat_id,
+                        message_id,
+                        elapsed,
+                    )
+                    return downloaded
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    LOGGER.warning(
+                        (
+                            "MTProto media download attempt failed via %s client "
+                            "chat_id=%s message_id=%s error=%s"
+                        ),
+                        client_kind,
+                        effective_chat_id,
+                        message_id,
+                        exc,
+                    )
 
         if last_error is not None:
             raise RuntimeError(
@@ -427,26 +432,39 @@ class TelegramUploader:
                 with contextlib.suppress(Exception):
                     destination.unlink()
             try:
-                message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
+                message = await self._call_with_mtproto_flood_wait_retry(
+                    lambda: client.get_messages(chat_id=chat_id, message_ids=message_id),
+                    context=f"get_messages chat_id={chat_id} message_id={message_id}",
+                )
             except PeerIdInvalid:
                 LOGGER.info(
                     "MTProto peer cache miss for chat_id=%s; priming peers and retrying",
                     chat_id,
                 )
                 await self._prime_mtproto_peer_cache(client, chat_id=chat_id)
-                message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
+                message = await self._call_with_mtproto_flood_wait_retry(
+                    lambda: client.get_messages(chat_id=chat_id, message_ids=message_id),
+                    context=f"get_messages retry chat_id={chat_id} message_id={message_id}",
+                )
             if isinstance(message, list):
                 message = message[0] if message else None
 
             if message is not None and has_media_fields(message):
+                message_for_download = message
                 try:
-                    saved_path = await asyncio.wait_for(
-                        client.download_media(
-                            message,
-                            file_name=str(destination),
-                            progress=on_download_progress,
+                    saved_path = await self._call_with_mtproto_flood_wait_retry(
+                        lambda: asyncio.wait_for(
+                            client.download_media(
+                                message_for_download,
+                                file_name=str(destination),
+                                progress=on_download_progress,
+                            ),
+                            timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
                         ),
-                        timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
+                        context=(
+                            f"download_media(message) chat_id={chat_id} "
+                            f"message_id={message_id}"
+                        ),
                     )
                 except RPCError as exc:
                     if "file_reference" in str(exc).lower() and attempt < 2:
@@ -464,13 +482,19 @@ class TelegramUploader:
 
             if fallback_file_id:
                 try:
-                    saved_path = await asyncio.wait_for(
-                        client.download_media(
-                            fallback_file_id,
-                            file_name=str(destination),
-                            progress=on_download_progress,
+                    saved_path = await self._call_with_mtproto_flood_wait_retry(
+                        lambda: asyncio.wait_for(
+                            client.download_media(
+                                fallback_file_id,
+                                file_name=str(destination),
+                                progress=on_download_progress,
+                            ),
+                            timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
                         ),
-                        timeout=self._MTD_DOWNLOAD_TIMEOUT_SECONDS,
+                        context=(
+                            f"download_media(file_id) chat_id={chat_id} "
+                            f"message_id={message_id}"
+                        ),
                     )
                 except RPCError as exc:
                     if "file_reference" in str(exc).lower() and attempt < 2:
@@ -490,6 +514,33 @@ class TelegramUploader:
             "Unable to download replied Telegram media via MTProto or downloaded file is empty."
         )
 
+    async def _call_with_mtproto_flood_wait_retry(
+        self,
+        call: Callable[[], Awaitable[Any]],
+        *,
+        context: str,
+        max_attempts: int = 8,
+    ) -> Any:
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            try:
+                return await call()
+            except FLOOD_WAIT_ERRORS as exc:
+                wait_seconds = max(
+                    1,
+                    int(getattr(exc, "value", getattr(exc, "x", getattr(exc, "seconds", 1)))),
+                )
+                if attempt >= attempts:
+                    raise
+                LOGGER.warning(
+                    "MTProto flood wait during %s; retrying in %ss (attempt %s/%s)",
+                    context,
+                    wait_seconds,
+                    attempt,
+                    attempts,
+                )
+                await asyncio.sleep(wait_seconds)
+
     async def _get_bot_mtproto_client(self) -> Client:
         if (
             self._bot_mtproto_client is not None
@@ -504,6 +555,7 @@ class TelegramUploader:
             bot_token=self._bot_token,
             in_memory=True,
             no_updates=True,
+            sleep_threshold=0,
         )
         await client.start()
         try:

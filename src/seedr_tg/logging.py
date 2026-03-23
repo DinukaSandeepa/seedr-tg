@@ -12,3 +12,8 @@ def configure_logging(level: str) -> None:
     # Keep app logs visible while suppressing per-request noise from HTTP clients.
     if resolved_level >= logging.INFO:
         logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+        logging.getLogger("pyrogram.connection.connection").setLevel(logging.WARNING)
+        logging.getLogger("pyrogram.client").setLevel(logging.WARNING)
+        logging.getLogger("pyrogram.session.auth").setLevel(logging.WARNING)
+        logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)

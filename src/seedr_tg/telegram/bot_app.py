@@ -382,6 +382,13 @@ class TelegramBotApp:
 
     async def upsert_queue_status_panel(self, *, force_create: bool = False) -> None:
         async with self._queue_status_lock:
+            jobs = await self._list_jobs_callback()
+            async with self._active_tasks_lock:
+                active_tasks = list(self._active_tasks.values())
+            if not force_create and self._all_tasks_completed(jobs, active_tasks):
+                await self._delete_queue_status_message_locked()
+                return
+
             payload, keyboard, selected_filter, safe_page = await self._render_status_page(
                 selected_filter=self._queue_status_filter,
                 page=self._queue_status_page,
@@ -498,6 +505,34 @@ class TelegramBotApp:
                     self._queue_status_last_update_at = time.monotonic()
                     return
                 raise
+
+    async def _delete_queue_status_message_locked(self) -> None:
+        message_id = self._queue_status_message_id
+        self._queue_status_message_id = None
+        self._queue_status_last_payload = None
+        self._queue_status_last_update_at = 0.0
+        self._queue_status_cooldown_until = 0.0
+        if message_id is None:
+            return
+        try:
+            await self._application.bot.delete_message(
+                chat_id=self._admin_chat_id,
+                message_id=message_id,
+            )
+        except BadRequest as exc:
+            if "message to delete not found" in str(exc).lower():
+                return
+            raise
+
+    @staticmethod
+    def _all_tasks_completed(
+        jobs: list[JobRecord],
+        tasks: list[ActiveTaskSnapshot],
+    ) -> bool:
+        final_phases = {"completed", "failed", "canceled"}
+        if any(task.phase not in final_phases for task in tasks):
+            return False
+        return all(job.phase.value in final_phases for job in jobs)
 
     @staticmethod
     def _parse_status_page(raw_page: str) -> int:
