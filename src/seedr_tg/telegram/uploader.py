@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode as PyrogramParseMode
 from pyrogram.errors import (
     FloodWait,
     PhoneCodeExpired,
@@ -20,7 +21,7 @@ from pyrogram.errors import (
     SessionPasswordNeeded,
 )
 from telegram import Bot, InputFile
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode as BotParseMode
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 
 from seedr_tg.db.models import (
@@ -295,6 +296,7 @@ class TelegramUploader:
         semaphore = asyncio.Semaphore(effective_upload_concurrency)
         progress_lock = asyncio.Lock()
         completed_files = 0
+        loop = asyncio.get_running_loop()
 
         async def upload_one(file_path: Path) -> None:
             nonlocal completed_files
@@ -333,8 +335,12 @@ class TelegramUploader:
                         int(total),
                     )
 
-                progress_emit_task = asyncio.create_task(emit())
-                progress_emit_task.add_done_callback(self._handle_progress_emit_done)
+                def schedule_emit() -> None:
+                    nonlocal progress_emit_task
+                    progress_emit_task = asyncio.create_task(emit())
+                    progress_emit_task.add_done_callback(self._handle_progress_emit_done)
+
+                loop.call_soon_threadsafe(schedule_emit)
 
             caption, parse_mode = self._render_caption(
                 file_path=file_path,
@@ -716,9 +722,9 @@ class TelegramUploader:
             return None
         normalized = parse_mode.strip().lower()
         if normalized == "html":
-            return "html"
+            return PyrogramParseMode.HTML
         if normalized in {"md", "markdown", "markdownv2", "markdown_v2"}:
-            return "markdown"
+            return PyrogramParseMode.MARKDOWN
         return None
 
     @staticmethod
@@ -727,9 +733,9 @@ class TelegramUploader:
             return None
         normalized = parse_mode.strip().lower()
         if normalized == "html":
-            return ParseMode.HTML
+            return BotParseMode.HTML
         if normalized in {"md", "markdown", "markdownv2", "markdown_v2"}:
-            return ParseMode.MARKDOWN_V2
+            return BotParseMode.MARKDOWN_V2
         return None
 
     @staticmethod
