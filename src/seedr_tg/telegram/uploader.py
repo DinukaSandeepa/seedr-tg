@@ -15,6 +15,7 @@ from pyrogram import Client
 from pyrogram.enums import ParseMode as PyrogramParseMode
 from pyrogram.errors import (
     FloodWait,
+    PeerIdInvalid,
     PhoneCodeExpired,
     PhoneCodeInvalid,
     RPCError,
@@ -323,7 +324,15 @@ class TelegramUploader:
             if destination.exists():
                 with contextlib.suppress(Exception):
                     destination.unlink()
-            message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
+            try:
+                message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
+            except PeerIdInvalid:
+                LOGGER.info(
+                    "MTProto peer cache miss for chat_id=%s; priming peers and retrying",
+                    chat_id,
+                )
+                await self._prime_mtproto_peer_cache(client, chat_id=chat_id)
+                message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
             if isinstance(message, list):
                 message = message[0] if message else None
 
@@ -367,6 +376,28 @@ class TelegramUploader:
         raise RuntimeError(
             "Unable to download replied Telegram media via MTProto or downloaded file is empty."
         )
+
+    async def _prime_mtproto_peer_cache(self, client: Client, *, chat_id: int) -> None:
+        """Populate Kurigram peer cache so numeric chat ids can resolve."""
+        with contextlib.suppress(Exception):
+            await client.resolve_peer(chat_id)
+            return
+
+        if chat_id > 0:
+            with contextlib.suppress(Exception):
+                await client.get_users(chat_id)
+                with contextlib.suppress(Exception):
+                    await client.resolve_peer(chat_id)
+                    return
+
+        with contextlib.suppress(Exception):
+            async for dialog in client.get_dialogs():
+                dialog_chat = getattr(dialog, "chat", None)
+                if getattr(dialog_chat, "id", None) == chat_id:
+                    break
+
+        with contextlib.suppress(Exception):
+            await client.resolve_peer(chat_id)
 
     async def upload_files(
         self,
