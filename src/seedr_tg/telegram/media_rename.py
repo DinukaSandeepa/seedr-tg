@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import Message, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from seedr_tg.db.repository import JobRepository
@@ -99,8 +100,27 @@ class TelegramMediaRenameHandler:
                 selected_mode,
             )
 
-            telegram_file = await context.bot.get_file(descriptor.file_id)
-            await telegram_file.download_to_drive(custom_path=str(temp_download_path))
+            try:
+                telegram_file = await context.bot.get_file(descriptor.file_id)
+                await telegram_file.download_to_drive(custom_path=str(temp_download_path))
+            except BadRequest as exc:
+                if "file is too big" not in str(exc).lower():
+                    raise
+                reply_chat = message.reply_to_message.chat
+                reply_chat_id = reply_chat.id if reply_chat is not None else chat.id
+                LOGGER.info(
+                    (
+                        "Bot API media download too large; falling back to MTProto "
+                        "chat_id=%s message_id=%s"
+                    ),
+                    reply_chat_id,
+                    message.reply_to_message.message_id,
+                )
+                await self._uploader.download_telegram_message_media(
+                    chat_id=reply_chat_id,
+                    message_id=message.reply_to_message.message_id,
+                    destination=temp_download_path,
+                )
 
             request = RenameRequest(
                 explicit_name=options.explicit_name,

@@ -273,6 +273,28 @@ class TelegramUploader:
             raise
         return await self._promote_client_session(client, state.phone_number)
 
+    async def download_telegram_message_media(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        destination: Path,
+    ) -> Path:
+        """Download media from a Telegram message via MTProto (Kurigram)."""
+        client = await self._get_client()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
+        if message is None:
+            raise RuntimeError("Unable to locate Telegram message for MTProto media download.")
+        if getattr(message, "media", None) is None:
+            raise RuntimeError("Replied Telegram message does not contain downloadable media.")
+
+        saved_path = await client.download_media(message, file_name=str(destination))
+        if saved_path is None:
+            raise RuntimeError("MTProto media download failed.")
+        return Path(saved_path)
+
     async def upload_files(
         self,
         file_paths: list[Path],
