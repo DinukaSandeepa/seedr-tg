@@ -795,24 +795,28 @@ class TelegramUploader:
                 if premium_available
                 else self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES
             )
+            effective_mtproto_limit = min(
+                int(effective_user_limit),
+                int(self._MTPROTO_UPLOAD_FILE_SIZE_LIMIT_BYTES),
+            )
 
             if (
                 self._upload_hybrid_mode
                 and file_size_bytes > self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES
             ):
-                if premium_available and file_size_bytes <= effective_user_limit:
+                if premium_available and file_size_bytes <= effective_mtproto_limit:
                     upload_targets = [(file_path, 0, telegram_filename)]
                 else:
                     if not self._upload_split_enabled:
-                        max_mib = self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES / (1024 * 1024)
+                        max_mib = effective_mtproto_limit / (1024 * 1024)
                         actual_mib = file_size_bytes / (1024 * 1024)
                         raise TelegramUploadTooLargeError(
-                            "File is too large for non-premium upload and splitting is "
+                            "File is too large for active MTProto upload limit and splitting is "
                             f"disabled ({actual_mib:.2f} MiB > {max_mib:.0f} MiB)."
                         )
                     split_cap = min(
                         max(64 * 1024 * 1024, int(self._upload_split_size_bytes)),
-                        self._MTPROTO_STANDARD_FILE_SIZE_LIMIT_BYTES,
+                        effective_mtproto_limit,
                     )
                     split_temp_dir = Path(
                         tempfile.mkdtemp(
@@ -874,8 +878,8 @@ class TelegramUploader:
                         )
 
                         if use_client_session:
-                            if part_size_bytes > effective_user_limit:
-                                max_mib = effective_user_limit / (1024 * 1024)
+                            if part_size_bytes > effective_mtproto_limit:
+                                max_mib = effective_mtproto_limit / (1024 * 1024)
                                 actual_mib = part_size_bytes / (1024 * 1024)
                                 raise TelegramUploadTooLargeError(
                                     "Split part exceeds active MTProto limit "
