@@ -109,20 +109,45 @@ class TelegramMediaRenameHandler:
                     raise
                 reply_chat = message.reply_to_message.chat
                 reply_chat_id = reply_chat.id if reply_chat is not None else chat.id
+                source_chat_id, source_message_id = self._resolve_mtproto_source_message(
+                    message.reply_to_message,
+                    default_chat_id=reply_chat_id,
+                )
                 LOGGER.info(
                     (
                         "Bot API media download too large; falling back to MTProto "
                         "chat_id=%s message_id=%s"
                     ),
-                    reply_chat_id,
-                    message.reply_to_message.message_id,
+                    source_chat_id,
+                    source_message_id,
                 )
-                downloaded_path = await self._uploader.download_telegram_message_media(
-                    chat_id=reply_chat_id,
-                    message_id=message.reply_to_message.message_id,
-                    destination=temp_download_path,
-                    fallback_file_id=descriptor.file_id,
-                )
+                try:
+                    downloaded_path = await self._uploader.download_telegram_message_media(
+                        chat_id=source_chat_id,
+                        message_id=source_message_id,
+                        destination=temp_download_path,
+                        fallback_file_id=descriptor.file_id,
+                    )
+                except RuntimeError:
+                    if (
+                        source_chat_id == reply_chat_id
+                        and source_message_id == message.reply_to_message.message_id
+                    ):
+                        raise
+                    LOGGER.info(
+                        (
+                            "MTProto source-forward lookup failed; retrying with replied "
+                            "message context chat_id=%s message_id=%s"
+                        ),
+                        reply_chat_id,
+                        message.reply_to_message.message_id,
+                    )
+                    downloaded_path = await self._uploader.download_telegram_message_media(
+                        chat_id=reply_chat_id,
+                        message_id=message.reply_to_message.message_id,
+                        destination=temp_download_path,
+                        fallback_file_id=descriptor.file_id,
+                    )
 
             if not downloaded_path.exists() or downloaded_path.stat().st_size <= 0:
                 raise RuntimeError("Failed to download replied media for rename (empty file).")
@@ -249,6 +274,36 @@ class TelegramMediaRenameHandler:
             return fallback
         suffix = Path(file_name).suffix
         return suffix if suffix else fallback
+
+    @staticmethod
+    def _resolve_mtproto_source_message(
+        replied_message: Message,
+        *,
+        default_chat_id: int,
+    ) -> tuple[int, int]:
+        """Resolve best MTProto source for media download.
+
+        For forwarded media, bot-PM message ids may not be downloadable via user MTProto
+        session. Prefer the original forwarded source when Telegram exposes it.
+        """
+        default_message_id = replied_message.message_id
+        forward_origin = getattr(replied_message, "forward_origin", None)
+        if forward_origin is not None:
+            origin_chat = getattr(forward_origin, "chat", None)
+            origin_message_id = getattr(forward_origin, "message_id", None)
+            if origin_chat is not None and origin_message_id is not None:
+                origin_chat_id = getattr(origin_chat, "id", None)
+                if isinstance(origin_chat_id, int):
+                    return origin_chat_id, int(origin_message_id)
+
+        legacy_forward_chat = getattr(replied_message, "forward_from_chat", None)
+        legacy_forward_message_id = getattr(replied_message, "forward_from_message_id", None)
+        if legacy_forward_chat is not None and legacy_forward_message_id is not None:
+            legacy_chat_id = getattr(legacy_forward_chat, "id", None)
+            if isinstance(legacy_chat_id, int):
+                return legacy_chat_id, int(legacy_forward_message_id)
+
+        return default_chat_id, default_message_id
 
     @staticmethod
     def _parse_options(text: str) -> MediaRenameOptions:
