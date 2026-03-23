@@ -284,36 +284,61 @@ class TelegramUploader:
         """Download media from a Telegram message via MTProto (Kurigram)."""
         client = await self._get_client()
         destination.parent.mkdir(parents=True, exist_ok=True)
+        media_fields = (
+            "document",
+            "video",
+            "audio",
+            "photo",
+            "animation",
+            "voice",
+        )
 
-        message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
-        if isinstance(message, list):
-            message = message[0] if message else None
+        def has_media_fields(msg: Any) -> bool:
+            return any(getattr(msg, field, None) is not None for field in media_fields)
 
-        has_media = False
-        if message is not None:
-            has_media = any(
-                getattr(message, field, None) is not None
-                for field in (
-                    "document",
-                    "video",
-                    "audio",
-                    "photo",
-                    "animation",
-                    "voice",
-                )
-            )
+        for attempt in range(1, 3):
+            message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
+            if isinstance(message, list):
+                message = message[0] if message else None
 
-        if has_media:
-            saved_path = await client.download_media(message, file_name=str(destination))
-            if saved_path is not None:
-                return Path(saved_path)
+            if message is not None and has_media_fields(message):
+                try:
+                    saved_path = await client.download_media(message, file_name=str(destination))
+                except RPCError as exc:
+                    if "file_reference" in str(exc).lower() and attempt < 2:
+                        LOGGER.info(
+                            "MTProto media file reference expired; retrying refresh attempt=%s",
+                            attempt,
+                        )
+                        await asyncio.sleep(0.2)
+                        continue
+                    raise
+                if saved_path is not None:
+                    path = Path(saved_path)
+                    if path.exists():
+                        return path
 
-        if fallback_file_id:
-            saved_path = await client.download_media(fallback_file_id, file_name=str(destination))
-            if saved_path is not None:
-                return Path(saved_path)
+            if fallback_file_id:
+                try:
+                    saved_path = await client.download_media(
+                        fallback_file_id,
+                        file_name=str(destination),
+                    )
+                except RPCError as exc:
+                    if "file_reference" in str(exc).lower() and attempt < 2:
+                        LOGGER.info(
+                            "MTProto file-id reference expired; retrying refresh attempt=%s",
+                            attempt,
+                        )
+                        await asyncio.sleep(0.2)
+                        continue
+                    raise
+                if saved_path is not None:
+                    path = Path(saved_path)
+                    if path.exists():
+                        return path
 
-        raise RuntimeError("Replied Telegram message does not contain downloadable media.")
+        raise RuntimeError("Unable to download replied Telegram media via MTProto.")
 
     async def upload_files(
         self,

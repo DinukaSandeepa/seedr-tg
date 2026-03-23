@@ -103,6 +103,7 @@ class TelegramMediaRenameHandler:
             try:
                 telegram_file = await context.bot.get_file(descriptor.file_id)
                 await telegram_file.download_to_drive(custom_path=str(temp_download_path))
+                downloaded_path = temp_download_path
             except BadRequest as exc:
                 if "file is too big" not in str(exc).lower():
                     raise
@@ -116,12 +117,15 @@ class TelegramMediaRenameHandler:
                     reply_chat_id,
                     message.reply_to_message.message_id,
                 )
-                await self._uploader.download_telegram_message_media(
+                downloaded_path = await self._uploader.download_telegram_message_media(
                     chat_id=reply_chat_id,
                     message_id=message.reply_to_message.message_id,
                     destination=temp_download_path,
                     fallback_file_id=descriptor.file_id,
                 )
+
+            if not downloaded_path.exists():
+                raise RuntimeError("Failed to download replied media for rename.")
 
             request = RenameRequest(
                 explicit_name=options.explicit_name,
@@ -135,7 +139,7 @@ class TelegramMediaRenameHandler:
             )
 
             final_path = temp_dir / final_name
-            await asyncio.to_thread(temp_download_path.rename, final_path)
+            await asyncio.to_thread(downloaded_path.rename, final_path)
 
             upload_settings = await self._repository.get_upload_settings()
             await self._uploader.upload_files(
