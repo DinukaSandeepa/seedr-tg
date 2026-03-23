@@ -296,7 +296,13 @@ class TelegramUploader:
         def has_media_fields(msg: Any) -> bool:
             return any(getattr(msg, field, None) is not None for field in media_fields)
 
+        def is_valid_download(path: Path) -> bool:
+            return path.exists() and path.is_file() and path.stat().st_size > 0
+
         for attempt in range(1, 3):
+            if destination.exists():
+                with contextlib.suppress(Exception):
+                    destination.unlink()
             message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
             if isinstance(message, list):
                 message = message[0] if message else None
@@ -315,7 +321,7 @@ class TelegramUploader:
                     raise
                 if saved_path is not None:
                     path = Path(saved_path)
-                    if path.exists():
+                    if is_valid_download(path):
                         return path
 
             if fallback_file_id:
@@ -335,10 +341,12 @@ class TelegramUploader:
                     raise
                 if saved_path is not None:
                     path = Path(saved_path)
-                    if path.exists():
+                    if is_valid_download(path):
                         return path
 
-        raise RuntimeError("Unable to download replied Telegram media via MTProto.")
+        raise RuntimeError(
+            "Unable to download replied Telegram media via MTProto or downloaded file is empty."
+        )
 
     async def upload_files(
         self,
@@ -433,6 +441,10 @@ class TelegramUploader:
 
             async with semaphore:
                 file_size_bytes = file_path.stat().st_size if file_path.exists() else 0
+                if file_size_bytes <= 0:
+                    raise RuntimeError(
+                        f"Refusing to upload empty file: {file_path}"
+                    )
                 use_client_session = file_size_bytes > self._BOT_API_FILE_SIZE_LIMIT_BYTES
                 if use_client_session:
                     client = await self._get_client()
@@ -669,6 +681,13 @@ class TelegramUploader:
                 if attempt >= max_attempts:
                     raise
             except (TimedOut, NetworkError, TelegramError, OSError, TimeoutError) as exc:
+                if (
+                    isinstance(exc, TelegramError)
+                    and "file must be non-empty" in str(exc).lower()
+                ):
+                    raise RuntimeError(
+                        f"Telegram rejected empty upload payload: {file_path}"
+                    ) from exc
                 if attempt >= max_attempts:
                     raise
                 if isinstance(exc, TimedOut | NetworkError | TimeoutError | OSError):

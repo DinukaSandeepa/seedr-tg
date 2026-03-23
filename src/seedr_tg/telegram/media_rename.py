@@ -124,8 +124,8 @@ class TelegramMediaRenameHandler:
                     fallback_file_id=descriptor.file_id,
                 )
 
-            if not downloaded_path.exists():
-                raise RuntimeError("Failed to download replied media for rename.")
+            if not downloaded_path.exists() or downloaded_path.stat().st_size <= 0:
+                raise RuntimeError("Failed to download replied media for rename (empty file).")
 
             request = RenameRequest(
                 explicit_name=options.explicit_name,
