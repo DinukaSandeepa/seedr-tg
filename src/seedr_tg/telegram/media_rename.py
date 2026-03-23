@@ -109,9 +109,16 @@ class TelegramMediaRenameHandler:
                     raise
                 reply_chat = message.reply_to_message.chat
                 reply_chat_id = reply_chat.id if reply_chat is not None else chat.id
+                mtproto_chat_id = self._uploader.resolve_mtproto_chat_id(
+                    bot_chat_id=reply_chat_id,
+                    is_private_chat=(
+                        reply_chat is not None
+                        and getattr(reply_chat, "type", None) == "private"
+                    ),
+                )
                 source_chat_id, source_message_id = self._resolve_mtproto_source_message(
                     message.reply_to_message,
-                    default_chat_id=reply_chat_id,
+                    default_chat_id=mtproto_chat_id,
                 )
                 LOGGER.info(
                     (
@@ -130,7 +137,7 @@ class TelegramMediaRenameHandler:
                     )
                 except RuntimeError:
                     if (
-                        source_chat_id == reply_chat_id
+                        source_chat_id == mtproto_chat_id
                         and source_message_id == message.reply_to_message.message_id
                     ):
                         raise
@@ -143,7 +150,7 @@ class TelegramMediaRenameHandler:
                         message.reply_to_message.message_id,
                     )
                     downloaded_path = await self._uploader.download_telegram_message_media(
-                        chat_id=reply_chat_id,
+                        chat_id=mtproto_chat_id,
                         message_id=message.reply_to_message.message_id,
                         destination=temp_download_path,
                         fallback_file_id=descriptor.file_id,

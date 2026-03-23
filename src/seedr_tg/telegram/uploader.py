@@ -101,6 +101,7 @@ class TelegramUploader:
         self._target_chat_id = target_chat_id
         self._repository = repository
         self._bootstrap_session_string = bootstrap_session_string
+        self._bot_user_id = self._parse_bot_user_id(bot_token)
         self._upload_retry_base_delay_seconds = (
             float(upload_retry_base_delay_seconds)
             if upload_retry_base_delay_seconds is not None
@@ -135,6 +136,21 @@ class TelegramUploader:
         self._governor_lock = asyncio.Lock()
         self._adaptive_upload_cap: int | None = None
         self._stable_upload_streak = 0
+
+    @staticmethod
+    def _parse_bot_user_id(bot_token: str) -> int | None:
+        token_prefix, _, _ = bot_token.partition(":")
+        try:
+            parsed = int(token_prefix)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def resolve_mtproto_chat_id(self, *, bot_chat_id: int, is_private_chat: bool) -> int:
+        """Resolve a Bot API chat id to a peer id usable by MTProto user sessions."""
+        if is_private_chat and self._bot_user_id is not None:
+            return self._bot_user_id
+        return bot_chat_id
 
     async def start(self) -> None:
         if self._bot is None:
