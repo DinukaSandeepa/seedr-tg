@@ -317,11 +317,24 @@ class QueueRunner:
         await self._repository.renumber_queue()
 
     async def _wait_for_seedr(self, job_id: int, torrent_id: int | None):
+        zero_progress_start: float | None = None
         while True:
             await self._check_cancellation(job_id)
             job = await self._repository.get_job(job_id)
             known_folder_id = job.seedr_folder_id if job else None
             snapshot = await self._poller.poll(torrent_id, known_folder_id=known_folder_id)
+            
+            if snapshot.progress_percent <= 0.0 and not snapshot.is_complete:
+                if zero_progress_start is None:
+                    zero_progress_start = time.monotonic()
+                elif (time.monotonic() - zero_progress_start) > 600.0:  # 10 minutes
+                    raise RuntimeError(
+                        "Seedr download stalled at 0.0% for 10 minutes. "
+                        "The magnet link likely has no seeders."
+                    )
+            else:
+                zero_progress_start = None
+
             job = await self._transition(
                 job_id,
                 phase=JobPhase.DOWNLOADING_SEEDR,
