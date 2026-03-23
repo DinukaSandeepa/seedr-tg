@@ -84,7 +84,7 @@ class TelegramUploader:
     _BOT_WRITE_TIMEOUT_SECONDS = 900.0
     _BOT_READ_TIMEOUT_SECONDS = 900.0
     _MTD_DOWNLOAD_TIMEOUT_SECONDS = 1800.0
-    _MTPROTO_UPLOAD_FILE_SIZE_LIMIT_BYTES = 2000 * 1024 * 1024
+    _MTPROTO_UPLOAD_FILE_SIZE_LIMIT_BYTES = 4000 * 1024 * 1024
     _UPLOAD_SPLIT_ENABLED = True
     _UPLOAD_SPLIT_SIZE_BYTES = 1900 * 1024 * 1024
     _UPLOAD_SPLIT_USE_FFMPEG_FOR_VIDEO = True
@@ -1257,6 +1257,8 @@ class TelegramUploader:
             self._user_is_premium = False
             return False
         me = await client.get_me()
+        # save_file() uses `client.me.is_premium` to pick 2000 vs 4000 MiB.
+        setattr(client, "me", me)
         self._user_is_premium = bool(getattr(me, "is_premium", False))
         LOGGER.info("User session premium=%s", self._user_is_premium)
         return bool(self._user_is_premium)
@@ -1426,19 +1428,23 @@ class TelegramUploader:
             index = 1
             with file_path.open("rb") as src:
                 while True:
-                    chunk = src.read(split_size_bytes)
-                    if not chunk:
-                        break
                     part_path = output_dir / f"{file_path.stem}.part{index:03d}{file_path.suffix}"
+                    written = 0
                     with part_path.open("wb") as dst:
-                        dst.write(chunk)
-                        remaining = split_size_bytes - len(chunk)
-                        while remaining > 0:
-                            block = src.read(min(remaining, self._SPLIT_IO_CHUNK_BYTES))
+                        while written < split_size_bytes:
+                            to_read = min(
+                                self._SPLIT_IO_CHUNK_BYTES,
+                                split_size_bytes - written,
+                            )
+                            block = src.read(to_read)
                             if not block:
                                 break
                             dst.write(block)
-                            remaining -= len(block)
+                            written += len(block)
+                    if written <= 0:
+                        with contextlib.suppress(FileNotFoundError):
+                            part_path.unlink()
+                        break
                     if part_path.stat().st_size <= 0:
                         raise RuntimeError(f"Empty split part generated: {part_path}")
                     parts.append(part_path)
@@ -1585,7 +1591,8 @@ class TelegramUploader:
         client = self._create_client(session_string, name="seedr_tg_uploader")
         await client.connect()
         try:
-            await client.get_me()
+            me = await client.get_me()
+            setattr(client, "me", me)
         except Exception as exc:
             await client.disconnect()
             raise RuntimeError("Stored Telegram user session is no longer authorized.") from exc
