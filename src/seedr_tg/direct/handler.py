@@ -60,6 +60,7 @@ class DirectDownloadCommandHandler:
         register_active_task_callback: Callable[[ActiveTaskSnapshot], Awaitable[None]],
         update_active_task_callback: Callable[[ActiveTaskSnapshot], Awaitable[None]],
         unregister_active_task_callback: Callable[[str], Awaitable[None]],
+        is_task_cancel_requested_callback: Callable[[str], Awaitable[bool]],
     ) -> None:
         self._downloader = downloader
         self._renamer = renamer
@@ -71,6 +72,7 @@ class DirectDownloadCommandHandler:
         self._register_active_task_callback = register_active_task_callback
         self._update_active_task_callback = update_active_task_callback
         self._unregister_active_task_callback = unregister_active_task_callback
+        self._is_task_cancel_requested_callback = is_task_cancel_requested_callback
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -116,14 +118,20 @@ class DirectDownloadCommandHandler:
                 eta_seconds=eta_seconds,
                 elapsed_seconds=int(max(0.0, time.monotonic() - started_at)),
                 phase=phase,
+                cancel_command=f"/cancel {task_id}",
             )
             if phase == "queued":
                 await self._register_active_task_callback(snapshot)
             else:
                 await self._update_active_task_callback(snapshot)
 
+        async def ensure_not_canceled() -> None:
+            if await self._is_task_cancel_requested_callback(task_id):
+                raise asyncio.CancelledError(f"Task {task_id} canceled")
+
         try:
             await push_task(phase="queued", step="Queued", progress_percent=0.0)
+            await ensure_not_canceled()
             LOGGER.info(
                 "Direct transfer started chat_id=%s message_id=%s url=%s",
                 chat.id,
@@ -131,11 +139,13 @@ class DirectDownloadCommandHandler:
                 options.url,
             )
             await push_task(phase="running", step="Downloading URL", progress_percent=15.0)
+            await ensure_not_canceled()
 
             downloaded = await self._downloader.download_to_path(
                 url=options.url,
                 destination_path=str(temp_download_path),
             )
+            await ensure_not_canceled()
 
             rename_request = RenameRequest(
                 explicit_name=options.rename_value,
@@ -154,13 +164,16 @@ class DirectDownloadCommandHandler:
             )
             final_path = temp_dir / final_name
             await asyncio.to_thread(temp_download_path.rename, final_path)
+            await ensure_not_canceled()
 
             await push_task(
                 phase="running",
                 step="Uploading to Telegram",
                 progress_percent=70.0,
             )
+            await ensure_not_canceled()
             await self._uploader.upload_file(bot=context.bot, chat_id=chat.id, file_path=final_path)
+            await ensure_not_canceled()
 
             elapsed = time.monotonic() - started_at
             LOGGER.info(
@@ -203,6 +216,39 @@ class DirectDownloadCommandHandler:
                     phase=JobPhase.COMPLETED,
                     file_names=[final_name],
                     failure_reason=None,
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except asyncio.CancelledError:
+            elapsed = int(time.monotonic() - started_at)
+            await push_task(
+                phase="canceled",
+                step="Canceled",
+                progress_percent=0.0,
+            )
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=options.url,
+                    size_bytes=0,
+                    elapsed_seconds=elapsed,
+                    mode_tags="#Leech | #ytdlp",
+                    total_files=0,
+                    requester=RequesterIdentity(
+                        user_id=update.effective_user.id if update.effective_user else None,
+                        username=(
+                            update.effective_user.username
+                            if update.effective_user
+                            else None
+                        ),
+                        display_name=(
+                            update.effective_user.full_name
+                            if update.effective_user
+                            else None
+                        ),
+                    ),
+                    phase=JobPhase.CANCELED,
+                    failure_reason="Cancellation requested",
                 ),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,

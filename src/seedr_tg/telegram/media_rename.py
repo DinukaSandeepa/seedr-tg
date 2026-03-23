@@ -64,6 +64,7 @@ class TelegramMediaRenameHandler:
             Callable[[ActiveTaskSnapshot], Awaitable[None]] | None
         ) = None,
         unregister_active_task_callback: Callable[[str], Awaitable[None]] | None = None,
+        is_task_cancel_requested_callback: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._uploader = uploader
         self._repository = repository
@@ -75,6 +76,7 @@ class TelegramMediaRenameHandler:
         self._register_active_task_callback = register_active_task_callback
         self._update_active_task_callback = update_active_task_callback
         self._unregister_active_task_callback = unregister_active_task_callback
+        self._is_task_cancel_requested_callback = is_task_cancel_requested_callback
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -186,6 +188,7 @@ class TelegramMediaRenameHandler:
                     eta_seconds=eta_seconds,
                     elapsed_seconds=int(max(0.0, time.monotonic() - started_at)),
                     phase=phase,
+                    cancel_command=f"/cancel {task_id}",
                 )
                 if phase == "queued":
                     if self._register_active_task_callback is not None:
@@ -193,12 +196,20 @@ class TelegramMediaRenameHandler:
                 elif self._update_active_task_callback is not None:
                     await self._update_active_task_callback(snapshot)
 
+        async def ensure_not_canceled() -> None:
+            if self._is_task_cancel_requested_callback is None:
+                return
+            if await self._is_task_cancel_requested_callback(task_id):
+                raise asyncio.CancelledError(f"Task {task_id} canceled")
+
         try:
             started_at = time.monotonic()
             await update_status(step="Queued", phase="queued", progress_percent=0.0)
+            await ensure_not_canceled()
             if self._task_semaphore.locked():
                 await update_status(step="Waiting for free rename slot")
             async with self._task_semaphore:
+                await ensure_not_canceled()
                 await self._run_rename_flow(
                     message=message,
                     chat_id=chat.id,
@@ -214,7 +225,28 @@ class TelegramMediaRenameHandler:
                     measure_speed=measure_speed,
                     render_transfer_detail=render_transfer_detail,
                     update_status=update_status,
+                    ensure_not_canceled=ensure_not_canceled,
                 )
+        except asyncio.CancelledError:
+            await update_status(
+                step="Canceled",
+                force=True,
+                phase="canceled",
+            )
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=descriptor.original_name,
+                    size_bytes=int(descriptor.size_bytes or 0),
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #telegram",
+                    total_files=0,
+                    requester=requester,
+                    phase=JobPhase.CANCELED,
+                    failure_reason="Cancellation requested",
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception(
                 "Telegram media rename failed chat_id=%s message_id=%s",
@@ -263,6 +295,7 @@ class TelegramMediaRenameHandler:
         measure_speed,
         render_transfer_detail,
         update_status,
+        ensure_not_canceled,
     ) -> None:
         try:
             LOGGER.info(
@@ -276,6 +309,7 @@ class TelegramMediaRenameHandler:
                 selected_mode,
             )
             await update_status(step="Downloading media")
+            await ensure_not_canceled()
 
             try:
                 telegram_file = await context.bot.get_file(descriptor.file_id)
@@ -367,6 +401,7 @@ class TelegramMediaRenameHandler:
 
             if not downloaded_path.exists() or downloaded_path.stat().st_size <= 0:
                 raise RuntimeError("Failed to download replied media for rename (empty file).")
+            await ensure_not_canceled()
 
             await update_status(step="Applying rename")
             request = RenameRequest(
@@ -383,6 +418,7 @@ class TelegramMediaRenameHandler:
             final_path = temp_dir / final_name
             await asyncio.to_thread(downloaded_path.rename, final_path)
             final_size_bytes = int(final_path.stat().st_size if final_path.exists() else 0)
+            await ensure_not_canceled()
 
             upload_settings = await self._repository.get_upload_settings()
             speed_samples.pop("upload", None)
@@ -415,6 +451,7 @@ class TelegramMediaRenameHandler:
                 )
 
             await update_status(step="Uploading to Telegram", final_name=final_name)
+            await ensure_not_canceled()
             await self._uploader.upload_files(
                 [final_path],
                 caption_prefix="Telegram media rename",
@@ -422,6 +459,7 @@ class TelegramMediaRenameHandler:
                 max_concurrent_uploads=1,
                 progress_hook=upload_progress_hook,
             )
+            await ensure_not_canceled()
 
             LOGGER.info(
                 (

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pymongo import ASCENDING, ReturnDocument
 
 from seedr_tg.db.models import (
     FINAL_PHASES,
@@ -49,13 +48,14 @@ class JobRepository:
         self._owns_client = client is None
         self._client = client or AsyncIOMotorClient(mongodb_uri)
         self._database: AsyncIOMotorDatabase = self._client[database_name]
-        self._jobs = self._database.jobs
         self._state = self._database.app_state
-        self._counters = self._database.counters
+
+        # Jobs queue is intentionally in-memory only.
+        self._jobs_mem: dict[int, JobRecord] = {}
+        self._next_job_id_value = 0
 
     async def initialize(self) -> None:
-        await self._jobs.create_index([("phase", ASCENDING), ("queue_position", ASCENDING)])
-        await self._jobs.create_index("magnet_link")
+        await asyncio.sleep(0)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -76,127 +76,118 @@ class JobRepository:
             queue_position = await self._next_queue_position()
             job_id = await self._next_job_id()
             now = utc_now()
-            await self._jobs.insert_one(
-                {
-                    "_id": job_id,
-                    "magnet_link": magnet_link,
-                    "source_chat_id": source_chat_id,
-                    "source_message_id": source_message_id,
-                    "created_by_user_id": created_by_user_id,
-                    "created_by_username": created_by_username,
-                    "created_by_display_name": created_by_display_name,
-                    "admin_message_id": None,
-                    "target_chat_id": target_chat_id,
-                    "phase": JobPhase.QUEUED.value,
-                    "queue_position": queue_position,
-                    "torrent_name": None,
-                    "total_size_bytes": None,
-                    "seedr_torrent_id": None,
-                    "seedr_folder_id": None,
-                    "seedr_folder_name": None,
-                    "progress_percent": 0.0,
-                    "download_speed_bps": 0.0,
-                    "upload_speed_bps": 0.0,
-                    "current_step": None,
-                    "local_path": None,
-                    "upload_file_count": 0,
-                    "uploaded_file_count": 0,
-                    "failure_reason": None,
-                    "last_error": None,
-                    "cancel_requested": False,
-                    "created_at": now,
-                    "updated_at": now,
-                }
+            job = JobRecord(
+                id=job_id,
+                magnet_link=magnet_link,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                created_by_user_id=created_by_user_id,
+                created_by_username=created_by_username,
+                created_by_display_name=created_by_display_name,
+                admin_message_id=None,
+                target_chat_id=target_chat_id,
+                phase=JobPhase.QUEUED,
+                queue_position=queue_position,
+                torrent_name=None,
+                total_size_bytes=None,
+                seedr_torrent_id=None,
+                seedr_folder_id=None,
+                seedr_folder_name=None,
+                progress_percent=0.0,
+                download_speed_bps=0.0,
+                upload_speed_bps=0.0,
+                current_step=None,
+                local_path=None,
+                upload_file_count=0,
+                uploaded_file_count=0,
+                failure_reason=None,
+                last_error=None,
+                cancel_requested=False,
+                created_at=now,
+                updated_at=now,
             )
-            return await self.get_job(job_id)
+            self._jobs_mem[job_id] = job
+            return self._copy_record(job)
 
     async def has_active_magnet(self, magnet_link: str) -> bool:
-        count = await self._jobs.count_documents(
-            {"magnet_link": magnet_link, "phase": {"$nin": FINAL_PHASE_VALUES}}
+        return any(
+            job.magnet_link == magnet_link and job.phase.value not in FINAL_PHASE_VALUES
+            for job in self._jobs_mem.values()
         )
-        return bool(count)
 
     async def get_job(self, job_id: int) -> JobRecord:
-        row = await self._jobs.find_one({"_id": job_id})
+        row = self._jobs_mem.get(int(job_id))
         if row is None:
             raise LookupError(f"Job {job_id} not found")
-        return self._to_record(row)
+        return self._copy_record(row)
 
     async def list_jobs(self, include_final: bool = False) -> list[JobRecord]:
-        query = {} if include_final else {"phase": {"$nin": FINAL_PHASE_VALUES}}
-        cursor = self._jobs.find(query).sort(
-            [
-                ("queue_position", ASCENDING),
-                ("_id", ASCENDING),
-            ]
-        )
-        rows = await cursor.to_list(length=None)
-        return [self._to_record(row) for row in rows]
+        rows = list(self._jobs_mem.values())
+        if not include_final:
+            rows = [job for job in rows if job.phase.value not in FINAL_PHASE_VALUES]
+        rows.sort(key=lambda job: (job.queue_position, job.id))
+        return [self._copy_record(job) for job in rows]
 
     async def get_next_job(self) -> JobRecord | None:
-        row = await self._jobs.find_one(
-            {"phase": {"$nin": FINAL_PHASE_VALUES}},
-            sort=[("queue_position", ASCENDING), ("_id", ASCENDING)],
-        )
-        return self._to_record(row) if row else None
+        rows = await self.list_jobs(include_final=False)
+        return rows[0] if rows else None
 
     async def claim_next_queued_job(self) -> JobRecord | None:
         async with self._write_lock:
-            row = await self._jobs.find_one_and_update(
-                {"phase": JobPhase.QUEUED.value},
-                {
-                    "$set": {
-                        "phase": JobPhase.VALIDATING.value,
-                        "current_step": "Queued for Seedr",
-                        "updated_at": utc_now(),
-                    }
-                },
-                sort=[("queue_position", ASCENDING), ("_id", ASCENDING)],
-                return_document=ReturnDocument.AFTER,
-            )
-            return self._to_record(row) if row else None
+            queued = [job for job in self._jobs_mem.values() if job.phase == JobPhase.QUEUED]
+            if not queued:
+                return None
+            queued.sort(key=lambda job: (job.queue_position, job.id))
+            claimed = queued[0]
+            claimed.phase = JobPhase.VALIDATING
+            claimed.current_step = "Queued for Seedr"
+            claimed.updated_at = utc_now()
+            return self._copy_record(claimed)
 
     async def update_job(self, job_id: int, **updates: Any) -> JobRecord:
         if not updates:
             return await self.get_job(job_id)
         async with self._write_lock:
+            job = self._jobs_mem.get(int(job_id))
+            if job is None:
+                raise LookupError(f"Job {job_id} not found")
             updates["updated_at"] = utc_now()
-            await self._jobs.update_one({"_id": job_id}, {"$set": _serialize_job_updates(updates)})
-            return await self.get_job(job_id)
+            normalized = _serialize_job_updates(updates)
+            for key, value in normalized.items():
+                if key == "phase":
+                    setattr(job, key, JobPhase(str(value)))
+                    continue
+                setattr(job, key, value)
+            return self._copy_record(job)
 
     async def request_cancel(self, job_id: int) -> JobRecord:
         return await self.update_job(job_id, cancel_requested=True)
 
     async def delete_job(self, job_id: int) -> bool:
         async with self._write_lock:
-            result = await self._jobs.delete_one({"_id": job_id})
-            return bool(result.deleted_count)
+            return self._jobs_mem.pop(int(job_id), None) is not None
 
     async def renumber_queue(self) -> None:
         async with self._write_lock:
-            active_jobs = await self.list_jobs(include_final=False)
+            active_jobs = [
+                job for job in self._jobs_mem.values() if job.phase.value not in FINAL_PHASE_VALUES
+            ]
+            active_jobs.sort(key=lambda job: (job.queue_position, job.id))
             for index, job in enumerate(active_jobs, start=1):
-                await self._jobs.update_one(
-                    {"_id": job.id},
-                    {"$set": {"queue_position": index, "updated_at": utc_now()}},
-                )
+                job.queue_position = index
+                job.updated_at = utc_now()
 
     async def _next_queue_position(self) -> int:
-        row = await self._jobs.find_one(
-            {"phase": {"$nin": FINAL_PHASE_VALUES}},
-            sort=[("queue_position", -1)],
-            projection={"queue_position": True},
-        )
-        return int(row["queue_position"] + 1) if row else 1
+        active = [
+            job.queue_position
+            for job in self._jobs_mem.values()
+            if job.phase.value not in FINAL_PHASE_VALUES
+        ]
+        return (max(active) + 1) if active else 1
 
     async def _next_job_id(self) -> int:
-        row = await self._counters.find_one_and_update(
-            {"_id": "job_id"},
-            {"$inc": {"value": 1}},
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-        return int(row["value"])
+        self._next_job_id_value += 1
+        return self._next_job_id_value
 
     async def save_seedr_device_code(
         self,
@@ -416,14 +407,13 @@ class JobRepository:
         return await self.get_authorized_chat_ids()
 
     @staticmethod
-    def _to_record(row: dict[str, Any]) -> JobRecord:
-        values = {field.name: row.get(field.name) for field in fields(JobRecord)}
-        values["id"] = row["_id"]
-        values["phase"] = JobPhase(values["phase"])
-        values["cancel_requested"] = bool(values["cancel_requested"])
-        values["download_speed_bps"] = float(values.get("download_speed_bps") or 0.0)
-        values["upload_speed_bps"] = float(values.get("upload_speed_bps") or 0.0)
-        return JobRecord(**values)
+    def _copy_record(record: JobRecord) -> JobRecord:
+        data = asdict(record)
+        data["phase"] = JobPhase(str(data["phase"]))
+        data["cancel_requested"] = bool(data["cancel_requested"])
+        data["download_speed_bps"] = float(data.get("download_speed_bps") or 0.0)
+        data["upload_speed_bps"] = float(data.get("upload_speed_bps") or 0.0)
+        return JobRecord(**data)
 
     @staticmethod
     def _to_upload_settings(row: dict[str, Any]) -> UploadSettings:

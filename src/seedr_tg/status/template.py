@@ -160,7 +160,7 @@ def render_compact_task_status(
 
 def render_active_task_status(task: ActiveTaskSnapshot) -> str:
     return render_compact_task_status(
-        title=task.title,
+        title=f"{task.title} (ID: {task.task_id})",
         progress_percent=task.progress_percent,
         status_text=task.status_text,
         speed_bps=task.speed_bps,

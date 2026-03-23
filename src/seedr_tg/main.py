@@ -179,6 +179,7 @@ async def run() -> None:
         register_active_task_callback=bot_app.register_active_task,
         update_active_task_callback=bot_app.update_active_task,
         unregister_active_task_callback=bot_app.unregister_active_task,
+        is_task_cancel_requested_callback=bot_app.is_task_cancel_requested,
     )
     media_rename_handler = TelegramMediaRenameHandler(
         uploader=uploader,
@@ -191,6 +192,7 @@ async def run() -> None:
         register_active_task_callback=bot_app.register_active_task,
         update_active_task_callback=bot_app.update_active_task,
         unregister_active_task_callback=bot_app.unregister_active_task,
+        is_task_cancel_requested_callback=bot_app.is_task_cancel_requested,
     )
     queue_runner = QueueRunner(
         settings=settings,

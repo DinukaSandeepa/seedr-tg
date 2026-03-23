@@ -43,6 +43,7 @@ from seedr_tg.worker.progress import format_job_status
 
 LOGGER = logging.getLogger(__name__)
 MAGNET_PATTERN = re.compile(r"magnet:\?[^\s]+", re.IGNORECASE)
+TASK_CANCEL_PATTERN = re.compile(r"^(direct|rename):-?\d+:\d+$", re.IGNORECASE)
 SETTINGS_ACTION_CAPTION = "caption"
 SETTINGS_ACTION_THUMBNAIL = "thumbnail"
 STATUS_PAGE_SIZE = 3
@@ -124,6 +125,7 @@ class TelegramBotApp:
         self._queue_status_cooldown_untils: dict[int, float] = {}
         self._queue_status_last_flood_log_ats: dict[int, float] = {}
         self._active_tasks: dict[str, ActiveTaskSnapshot] = {}
+        self._task_cancel_flags: dict[str, bool] = {}
         self._active_tasks_lock = asyncio.Lock()
         self._application = (
             Application.builder()
@@ -140,12 +142,13 @@ class TelegramBotApp:
         self._application.add_handler(CommandHandler("authorize", self._authorize_group_chat))
         self._application.add_handler(CommandHandler("direct", direct_download_handler))
         self._application.add_handler(CommandHandler("rename", telegram_media_rename_handler))
+        self._application.add_handler(CommandHandler("cancel", self._cancel_command))
         self._application.add_handler(CommandHandler("settings", self._settings))
         self._application.add_handler(
             CallbackQueryHandler(self._handle_settings_callback, pattern=r"^settings:")
         )
         self._application.add_handler(
-            CallbackQueryHandler(self._handle_cancel, pattern=r"^cancel:\d+$")
+            CallbackQueryHandler(self._handle_cancel, pattern=r"^cancel:.+$")
         )
         self._application.add_handler(
             CallbackQueryHandler(self._handle_status_callback, pattern=r"^status:")
@@ -681,6 +684,7 @@ class TelegramBotApp:
     async def register_active_task(self, task: ActiveTaskSnapshot) -> None:
         async with self._active_tasks_lock:
             self._active_tasks[task.task_id] = task
+            self._task_cancel_flags[task.task_id] = False
         chat_id = self._task_chat_id(task.task_id)
         if chat_id is None:
             return
@@ -698,10 +702,27 @@ class TelegramBotApp:
     async def unregister_active_task(self, task_id: str) -> None:
         async with self._active_tasks_lock:
             self._active_tasks.pop(task_id, None)
+            self._task_cancel_flags.pop(task_id, None)
         chat_id = self._task_chat_id(task_id)
         if chat_id is None:
             return
         await self.upsert_queue_status_panel(chat_id=chat_id, force_create=False)
+
+    async def request_task_cancel(self, task_id: str) -> bool:
+        normalized = str(task_id).strip()
+        async with self._active_tasks_lock:
+            if normalized not in self._active_tasks:
+                return False
+            self._task_cancel_flags[normalized] = True
+        chat_id = self._task_chat_id(normalized)
+        if chat_id is not None:
+            await self.upsert_queue_status_panel(chat_id=chat_id, force_create=False)
+        return True
+
+    async def is_task_cancel_requested(self, task_id: str) -> bool:
+        normalized = str(task_id).strip()
+        async with self._active_tasks_lock:
+            return bool(self._task_cancel_flags.get(normalized, False))
 
     @staticmethod
     def _task_chat_id(task_id: str) -> int | None:
@@ -1056,8 +1077,24 @@ class TelegramBotApp:
         if query is None:
             return
         await query.answer()
-        _, raw_job_id = query.data.split(":", maxsplit=1)
-        job = await self._cancel_callback(int(raw_job_id))
+        _, raw_target = query.data.split(":", maxsplit=1)
+        raw_target = raw_target.strip()
+        if self._is_task_cancel_target(raw_target):
+            canceled = await self.request_task_cancel(raw_target)
+            if canceled:
+                await query.edit_message_text(
+                    f"Cancellation requested for task <code>{escape(raw_target)}</code>.",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            else:
+                await query.edit_message_text("Task not found or already finished.")
+            return
+        if not raw_target.isdigit():
+            await query.edit_message_text("Invalid cancel target.")
+            return
+
+        job = await self._cancel_callback(int(raw_target))
         jobs = await self._list_jobs_callback()
         bot_stats = self._build_bot_stats(jobs)
         attempts = 0
@@ -1079,6 +1116,40 @@ class TelegramBotApp:
                 if attempts >= 3:
                     raise
                 await asyncio.sleep(wait_seconds)
+
+    async def _cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if message is None or chat is None:
+            return
+        if not await self.is_chat_authorized(chat.id):
+            await message.reply_text("This chat is not authorized.")
+            return
+        if not context.args:
+            await message.reply_text("Usage: /cancel <job_id|task_id>")
+            return
+
+        raw_target = str(context.args[0]).strip()
+        if self._is_task_cancel_target(raw_target):
+            canceled = await self.request_task_cancel(raw_target)
+            if canceled:
+                await message.reply_text(f"Cancellation requested for task {raw_target}.")
+            else:
+                await message.reply_text("Task not found or already finished.")
+            return
+        if raw_target.isdigit():
+            try:
+                await self._cancel_callback(int(raw_target))
+            except LookupError:
+                await message.reply_text(f"Job {raw_target} not found.")
+                return
+            await message.reply_text(f"Cancellation requested for job {raw_target}.")
+            return
+        await message.reply_text("Invalid cancel target. Use numeric job id or direct:/rename task id.")
+
+    @staticmethod
+    def _is_task_cancel_target(raw_target: str) -> bool:
+        return bool(TASK_CANCEL_PATTERN.fullmatch(str(raw_target).strip()))
 
     @staticmethod
     def _extract_magnet(text: str) -> str | None:
