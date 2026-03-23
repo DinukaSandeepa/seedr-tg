@@ -919,6 +919,8 @@ class TelegramUploader:
                                 progress_hook=None,
                                 completed_files=completed_files,
                                 total_files=total_files,
+                                mtproto_fallback_payload=target_payload,
+                                mtproto_upload_max_retries=upload_max_retries,
                             )
                             on_progress(
                                 int(min(file_size_bytes, offset_base + part_size_bytes)),
@@ -1047,11 +1049,14 @@ class TelegramUploader:
         progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None,
         completed_files: int,
         total_files: int,
+        mtproto_fallback_payload: dict[str, Any] | None = None,
+        mtproto_upload_max_retries: int | None = None,
     ) -> tuple[bool, int]:
         max_attempts = max(1, int(upload_max_retries))
         had_flood_wait = False
         total_bytes = file_path.stat().st_size if file_path.exists() else 0
         bot_parse_mode = self._resolve_bot_parse_mode(parse_mode)
+        last_exception: BaseException | None = None
         for attempt in range(1, max_attempts + 1):
             bot = self._bot
             if bot is None:
@@ -1142,10 +1147,12 @@ class TelegramUploader:
                 wait_seconds = max(1, int(exc.retry_after))
                 wait_seconds = max(1.0, float(wait_seconds) * self._FLOOD_WAIT_SAFETY_MULTIPLIER)
                 LOGGER.warning("Bot API flood wait while uploading; sleeping %.2fs", wait_seconds)
-                await asyncio.sleep(wait_seconds)
                 if attempt >= max_attempts:
-                    raise
+                    last_exception = exc
+                    break
+                await asyncio.sleep(wait_seconds)
             except (TimedOut, NetworkError, TelegramError, OSError, TimeoutError) as exc:
+                last_exception = exc
                 if (
                     isinstance(exc, TelegramError)
                     and "file must be non-empty" in str(exc).lower()
@@ -1153,8 +1160,6 @@ class TelegramUploader:
                     raise RuntimeError(
                         f"Telegram rejected empty upload payload: {file_path}"
                     ) from exc
-                if attempt >= max_attempts:
-                    raise
                 if isinstance(exc, TimedOut | NetworkError | TimeoutError | OSError):
                     await self._reset_bot_client_for_retry(exc)
                 backoff = min(
@@ -1170,7 +1175,39 @@ class TelegramUploader:
                     delay,
                     repr(exc),
                 )
+                if attempt >= max_attempts:
+                    break
                 await asyncio.sleep(delay)
+        if (
+            mtproto_fallback_payload is not None
+            and last_exception is not None
+            and isinstance(last_exception, (TimedOut, NetworkError, TimeoutError, OSError))
+        ):
+            LOGGER.warning(
+                (
+                    "Bot upload failed after %s attempts; falling back to MTProto user "
+                    "session due to %s"
+                ),
+                max_attempts,
+                repr(last_exception),
+            )
+            client = await self._get_client()
+            mtproto_attempts = (
+                int(mtproto_upload_max_retries)
+                if mtproto_upload_max_retries is not None
+                else max_attempts
+            )
+            mtproto_had_flood, mtproto_retry_count = await self._send_file_with_retry(
+                client,
+                mtproto_fallback_payload,
+                upload_max_retries=mtproto_attempts,
+            )
+            return (
+                had_flood_wait or mtproto_had_flood,
+                (max_attempts - 1) + mtproto_retry_count,
+            )
+        if last_exception is not None:
+            raise last_exception
         return had_flood_wait, max_attempts - 1
 
     async def _reset_bot_client_for_retry(self, exc: BaseException) -> None:
