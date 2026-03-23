@@ -134,17 +134,24 @@ class TelegramUploader:
             self._bootstrap_session_string
             and await self._repository.get_telegram_user_session() is None
         ):
-            client = await self._connect_client(self._bootstrap_session_string)
             try:
-                await self._persist_authorized_session(client, phone_number=None)
-            finally:
-                with contextlib.suppress(Exception):
-                    await client.disconnect()
+                client = await self._connect_client(self._bootstrap_session_string)
+                try:
+                    await self._persist_authorized_session(client, phone_number=None)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Bootstrap MTProto session is not compatible with Kurigram. "
+                    "Run /session_start <phone> to create a new session. details=%s",
+                    exc,
+                )
         stored_session = await self._repository.get_telegram_user_session()
         if stored_session is not None:
             try:
                 self._client = await self._connect_client(stored_session.session_string)
-            except RuntimeError as exc:
+            except Exception as exc:  # noqa: BLE001
                 LOGGER.warning(
                     "Stored MTProto session is not valid for Kurigram uploader. "
                     "Run /session_start <phone> to recreate it. details=%s",
