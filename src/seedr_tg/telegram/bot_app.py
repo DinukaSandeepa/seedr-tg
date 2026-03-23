@@ -118,7 +118,12 @@ class TelegramBotApp:
         self._queue_status_last_flood_log_at = 0.0
         self._active_tasks: dict[str, ActiveTaskSnapshot] = {}
         self._active_tasks_lock = asyncio.Lock()
-        self._application = Application.builder().token(token).build()
+        self._application = (
+            Application.builder()
+            .token(token)
+            .concurrent_updates(True)
+            .build()
+        )
         self._application.add_handler(CommandHandler("status", self._status))
         self._application.add_handler(CommandHandler("seedr_auth", self._seedr_auth))
         self._application.add_handler(CommandHandler("seedr_auth_done", self._seedr_auth_done))
@@ -572,18 +577,18 @@ class TelegramBotApp:
     async def register_active_task(self, task: ActiveTaskSnapshot) -> None:
         async with self._active_tasks_lock:
             self._active_tasks[task.task_id] = task
-        await self.upsert_queue_status_panel(force_create=True)
+        await self.upsert_queue_status_panel(force_create=False)
 
     async def update_active_task(self, task: ActiveTaskSnapshot) -> None:
         async with self._active_tasks_lock:
             if task.task_id in self._active_tasks:
                 self._active_tasks[task.task_id] = task
-        await self.upsert_queue_status_panel(force_create=True)
+        await self.upsert_queue_status_panel(force_create=False)
 
     async def unregister_active_task(self, task_id: str) -> None:
         async with self._active_tasks_lock:
             self._active_tasks.pop(task_id, None)
-        await self.upsert_queue_status_panel(force_create=True)
+        await self.upsert_queue_status_panel(force_create=False)
 
     @staticmethod
     def _status_keyboard(

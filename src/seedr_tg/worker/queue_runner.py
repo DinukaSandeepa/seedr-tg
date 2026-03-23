@@ -489,7 +489,7 @@ class QueueRunner:
 
     async def _sync_admin_message(self, job: JobRecord) -> None:
         del job
-        await self._bot_app.upsert_queue_status_panel(force_create=True)
+        await self._bot_app.upsert_queue_status_panel(force_create=False)
 
     async def _sync_admin_message_best_effort(self, job: JobRecord) -> None:
         try:
