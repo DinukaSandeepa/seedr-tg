@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from html import escape
 from pathlib import Path
@@ -111,6 +112,10 @@ class TelegramBotApp:
         self._queue_status_filter: StatusFilter = STATUS_FILTER_ACTIVE
         self._queue_status_page: int = 0
         self._queue_status_lock = asyncio.Lock()
+        self._queue_status_last_payload: str | None = None
+        self._queue_status_last_update_at = 0.0
+        self._queue_status_cooldown_until = 0.0
+        self._queue_status_last_flood_log_at = 0.0
         self._active_tasks: dict[str, ActiveTaskSnapshot] = {}
         self._active_tasks_lock = asyncio.Lock()
         self._application = Application.builder().token(token).build()
@@ -321,6 +326,8 @@ class TelegramBotApp:
             self._queue_status_message_id = message_id
             self._queue_status_filter = normalized_filter
             self._queue_status_page = normalized_page
+            self._queue_status_last_payload = payload
+            self._queue_status_last_update_at = time.monotonic()
 
     async def _render_status_page(
         self,
@@ -376,11 +383,28 @@ class TelegramBotApp:
             )
             self._queue_status_filter = selected_filter
             self._queue_status_page = safe_page
+            now = time.monotonic()
 
             message_id = self._queue_status_message_id
+            if (
+                message_id is not None
+                and payload == self._queue_status_last_payload
+                and not force_create
+            ):
+                return
+            if message_id is not None and now < self._queue_status_cooldown_until:
+                return
+            if (
+                message_id is not None
+                and not force_create
+                and (now - self._queue_status_last_update_at) < 2.0
+            ):
+                return
             if force_create and message_id is None:
                 posted_id = await self.post_admin_message(payload)
                 self._queue_status_message_id = posted_id
+                self._queue_status_last_payload = payload
+                self._queue_status_last_update_at = time.monotonic()
                 try:
                     await self._application.bot.edit_message_reply_markup(
                         chat_id=self._admin_chat_id,
@@ -402,6 +426,8 @@ class TelegramBotApp:
             if message_id is None:
                 posted_id = await self.post_admin_message(payload)
                 self._queue_status_message_id = posted_id
+                self._queue_status_last_payload = payload
+                self._queue_status_last_update_at = time.monotonic()
                 with contextlib.suppress(Exception):
                     await self._application.bot.edit_message_text(
                         chat_id=self._admin_chat_id,
@@ -422,16 +448,29 @@ class TelegramBotApp:
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
                 )
+                self._queue_status_last_payload = payload
+                self._queue_status_last_update_at = time.monotonic()
             except RetryAfter as exc:
-                await asyncio.sleep(max(1.0, float(exc.retry_after)))
+                wait_seconds = max(1.0, float(exc.retry_after) * 1.08)
+                self._queue_status_cooldown_until = time.monotonic() + wait_seconds
+                if (time.monotonic() - self._queue_status_last_flood_log_at) >= 15.0:
+                    LOGGER.warning(
+                        "Queue status panel rate-limited; cooling down %.2fs",
+                        wait_seconds,
+                    )
+                    self._queue_status_last_flood_log_at = time.monotonic()
                 return
             except BadRequest as exc:
                 text = str(exc).lower()
                 if "message is not modified" in text:
+                    self._queue_status_last_payload = payload
+                    self._queue_status_last_update_at = time.monotonic()
                     return
                 if "message to edit not found" in text:
                     posted_id = await self.post_admin_message(payload)
                     self._queue_status_message_id = posted_id
+                    self._queue_status_last_payload = payload
+                    self._queue_status_last_update_at = time.monotonic()
                     with contextlib.suppress(Exception):
                         await self._application.bot.edit_message_text(
                             chat_id=self._admin_chat_id,
@@ -450,6 +489,8 @@ class TelegramBotApp:
                         reply_markup=keyboard,
                         disable_web_page_preview=True,
                     )
+                    self._queue_status_last_payload = payload
+                    self._queue_status_last_update_at = time.monotonic()
                     return
                 raise
 

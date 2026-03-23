@@ -317,12 +317,15 @@ class TelegramMediaRenameHandler:
                     if channel != "download":
                         return
                     speed_bps = measure_speed("download", current_bytes)
+                    effective_total = int(total_bytes)
+                    if effective_total <= 0:
+                        effective_total = int(descriptor.size_bytes or 0)
                     percent = 0.0
-                    if total_bytes > 0:
-                        percent = (float(current_bytes) / float(total_bytes)) * 100.0
+                    if effective_total > 0:
+                        percent = (float(current_bytes) / float(effective_total)) * 100.0
                     eta_seconds = None
-                    if total_bytes > current_bytes and speed_bps > 0:
-                        eta_seconds = int((total_bytes - current_bytes) / speed_bps)
+                    if effective_total > current_bytes and speed_bps > 0:
+                        eta_seconds = int((effective_total - current_bytes) / speed_bps)
                     await update_status(
                         step="Downloading media (MTProto fallback)",
                         progress_percent=percent,
@@ -379,6 +382,7 @@ class TelegramMediaRenameHandler:
 
             final_path = temp_dir / final_name
             await asyncio.to_thread(downloaded_path.rename, final_path)
+            final_size_bytes = int(final_path.stat().st_size if final_path.exists() else 0)
 
             upload_settings = await self._repository.get_upload_settings()
             speed_samples.pop("upload", None)
@@ -391,13 +395,17 @@ class TelegramMediaRenameHandler:
                 total_bytes: int,
             ) -> None:
                 del completed, total
+                del detail
+                effective_total = int(total_bytes)
+                if effective_total <= 0:
+                    effective_total = final_size_bytes
                 percent = 0.0
-                if total_bytes > 0:
-                    percent = (float(current) / float(total_bytes)) * 100.0
+                if effective_total > 0:
+                    percent = (float(current) / float(effective_total)) * 100.0
                 speed_bps = measure_speed("upload", current)
                 eta_seconds = None
-                if total_bytes > current and speed_bps > 0:
-                    eta_seconds = int((total_bytes - current) / speed_bps)
+                if effective_total > current and speed_bps > 0:
+                    eta_seconds = int((effective_total - current) / speed_bps)
                 await update_status(
                     step="Uploading to Telegram",
                     final_name=final_name,
