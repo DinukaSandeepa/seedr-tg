@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import shlex
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import Message, Update
+from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -87,6 +90,54 @@ class TelegramMediaRenameHandler:
         )
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_download_path = temp_dir / "payload.part"
+        status_message = await message.reply_text(
+            self._render_status_text(
+                original_name=descriptor.original_name,
+                mode=selected_mode,
+                step="Queued",
+            ),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        last_status_text: str | None = None
+        last_status_update_at = 0.0
+
+        async def update_status(
+            *,
+            step: str,
+            final_name: str | None = None,
+            progress_percent: float | None = None,
+            progress_detail: str | None = None,
+            force: bool = False,
+        ) -> None:
+            nonlocal last_status_text, last_status_update_at
+            text = self._render_status_text(
+                original_name=descriptor.original_name,
+                mode=selected_mode,
+                step=step,
+                final_name=final_name,
+                progress_percent=progress_percent,
+                progress_detail=progress_detail,
+            )
+            now = time.monotonic()
+            if not force and text == last_status_text:
+                return
+            if not force and (now - last_status_update_at) < 0.9:
+                return
+            try:
+                await status_message.edit_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                last_status_text = text
+                last_status_update_at = now
+            except BadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    last_status_text = text
+                    last_status_update_at = now
+                    return
+                raise
 
         try:
             LOGGER.info(
@@ -99,6 +150,7 @@ class TelegramMediaRenameHandler:
                 descriptor.original_name,
                 selected_mode,
             )
+            await update_status(step="Downloading media")
 
             try:
                 telegram_file = await context.bot.get_file(descriptor.file_id)
@@ -129,6 +181,7 @@ class TelegramMediaRenameHandler:
                     source_chat_id,
                     source_message_id,
                 )
+                await update_status(step="Downloading media (MTProto fallback)")
                 try:
                     downloaded_path = await self._uploader.download_telegram_message_media(
                         chat_id=source_chat_id,
@@ -162,6 +215,7 @@ class TelegramMediaRenameHandler:
             if not downloaded_path.exists() or downloaded_path.stat().st_size <= 0:
                 raise RuntimeError("Failed to download replied media for rename (empty file).")
 
+            await update_status(step="Applying rename")
             request = RenameRequest(
                 explicit_name=options.explicit_name,
                 prefix=options.prefix,
@@ -177,11 +231,32 @@ class TelegramMediaRenameHandler:
             await asyncio.to_thread(downloaded_path.rename, final_path)
 
             upload_settings = await self._repository.get_upload_settings()
+
+            async def upload_progress_hook(
+                completed: int,
+                total: int,
+                detail: str,
+                current: int,
+                total_bytes: int,
+            ) -> None:
+                del completed, total
+                percent = 0.0
+                if total_bytes > 0:
+                    percent = (float(current) / float(total_bytes)) * 100.0
+                await update_status(
+                    step="Uploading to Telegram",
+                    final_name=final_name,
+                    progress_percent=percent,
+                    progress_detail=detail,
+                )
+
+            await update_status(step="Uploading to Telegram", final_name=final_name)
             await self._uploader.upload_files(
                 [final_path],
                 caption_prefix="Telegram media rename",
                 upload_settings=upload_settings,
                 max_concurrent_uploads=1,
+                progress_hook=upload_progress_hook,
             )
 
             LOGGER.info(
@@ -193,10 +268,11 @@ class TelegramMediaRenameHandler:
                 descriptor.original_name,
                 final_name,
             )
-            await message.reply_text(
-                "Rename and upload completed.\n"
-                f"Original: {descriptor.original_name}\n"
-                f"Final: {final_name}"
+            await update_status(
+                step="Completed",
+                final_name=final_name,
+                progress_percent=100.0,
+                force=True,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception(
@@ -204,9 +280,57 @@ class TelegramMediaRenameHandler:
                 chat.id,
                 message.message_id,
             )
-            await message.reply_text(f"Rename upload failed: {exc}")
+            await update_status(
+                step=f"Failed: {exc}",
+                progress_detail="See logs for traceback.",
+                force=True,
+            )
         finally:
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
+
+    @staticmethod
+    def _format_bytes(value: int) -> str:
+        units = ["B", "KB", "MB", "GB", "TB"]
+        amount = float(max(0, int(value)))
+        index = 0
+        while amount >= 1024.0 and index < len(units) - 1:
+            amount /= 1024.0
+            index += 1
+        return f"{amount:.2f} {units[index]}"
+
+    @staticmethod
+    def _progress_bar(percent: float, width: int = 12) -> str:
+        normalized = max(0.0, min(100.0, percent))
+        filled = round((normalized / 100.0) * width)
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+    def _render_status_text(
+        self,
+        *,
+        original_name: str,
+        mode: str,
+        step: str,
+        final_name: str | None = None,
+        progress_percent: float | None = None,
+        progress_detail: str | None = None,
+    ) -> str:
+        safe_original = html.escape(original_name)
+        safe_mode = html.escape(mode)
+        safe_step = html.escape(step)
+        lines = [
+            "<b>Rename Status</b>",
+            f"<b>Original:</b> {safe_original}",
+            f"<b>Mode:</b> {safe_mode}",
+            f"<b>Step:</b> {safe_step}",
+        ]
+        if final_name:
+            lines.append(f"<b>Final:</b> {html.escape(final_name)}")
+        if progress_percent is not None:
+            bar = self._progress_bar(progress_percent)
+            lines.append(f"<b>Progress:</b> {bar} {progress_percent:.1f}%")
+        if progress_detail:
+            lines.append(f"<b>Detail:</b> {html.escape(progress_detail)}")
+        return "\n".join(lines)
 
     @staticmethod
     def _extract_media_descriptor(message: Message) -> TelegramMediaDescriptor:
