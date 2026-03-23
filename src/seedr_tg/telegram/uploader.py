@@ -279,21 +279,41 @@ class TelegramUploader:
         chat_id: int,
         message_id: int,
         destination: Path,
+        fallback_file_id: str | None = None,
     ) -> Path:
         """Download media from a Telegram message via MTProto (Kurigram)."""
         client = await self._get_client()
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         message = await client.get_messages(chat_id=chat_id, message_ids=message_id)
-        if message is None:
-            raise RuntimeError("Unable to locate Telegram message for MTProto media download.")
-        if getattr(message, "media", None) is None:
-            raise RuntimeError("Replied Telegram message does not contain downloadable media.")
+        if isinstance(message, list):
+            message = message[0] if message else None
 
-        saved_path = await client.download_media(message, file_name=str(destination))
-        if saved_path is None:
-            raise RuntimeError("MTProto media download failed.")
-        return Path(saved_path)
+        has_media = False
+        if message is not None:
+            has_media = any(
+                getattr(message, field, None) is not None
+                for field in (
+                    "document",
+                    "video",
+                    "audio",
+                    "photo",
+                    "animation",
+                    "voice",
+                )
+            )
+
+        if has_media:
+            saved_path = await client.download_media(message, file_name=str(destination))
+            if saved_path is not None:
+                return Path(saved_path)
+
+        if fallback_file_id:
+            saved_path = await client.download_media(fallback_file_id, file_name=str(destination))
+            if saved_path is not None:
+                return Path(saved_path)
+
+        raise RuntimeError("Replied Telegram message does not contain downloadable media.")
 
     async def upload_files(
         self,

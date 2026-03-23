@@ -120,6 +120,7 @@ class TelegramMediaRenameHandler:
                     chat_id=reply_chat_id,
                     message_id=message.reply_to_message.message_id,
                     destination=temp_download_path,
+                    fallback_file_id=descriptor.file_id,
                 )
 
             request = RenameRequest(
