@@ -67,6 +67,9 @@ class JobRepository:
         source_chat_id: int,
         source_message_id: int,
         target_chat_id: int,
+        created_by_user_id: int | None = None,
+        created_by_username: str | None = None,
+        created_by_display_name: str | None = None,
     ) -> JobRecord:
         async with self._write_lock:
             queue_position = await self._next_queue_position()
@@ -78,6 +81,9 @@ class JobRepository:
                     "magnet_link": magnet_link,
                     "source_chat_id": source_chat_id,
                     "source_message_id": source_message_id,
+                    "created_by_user_id": created_by_user_id,
+                    "created_by_username": created_by_username,
+                    "created_by_display_name": created_by_display_name,
                     "admin_message_id": None,
                     "target_chat_id": target_chat_id,
                     "phase": JobPhase.QUEUED.value,

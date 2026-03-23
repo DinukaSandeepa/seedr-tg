@@ -41,6 +41,9 @@ class JobRecord:
     magnet_link: str
     source_chat_id: int
     source_message_id: int
+    created_by_user_id: int | None
+    created_by_username: str | None
+    created_by_display_name: str | None
     admin_message_id: int | None
     target_chat_id: int
     phase: JobPhase

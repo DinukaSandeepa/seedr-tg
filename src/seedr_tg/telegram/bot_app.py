@@ -62,7 +62,10 @@ class TelegramBotApp:
         token: str,
         source_chat_id: int,
         admin_chat_id: int,
-        enqueue_callback: Callable[[str, int, int], Awaitable[JobRecord | None]],
+        enqueue_callback: Callable[
+            [str, int, int, int | None, str | None, str | None],
+            Awaitable[JobRecord | None],
+        ],
         list_jobs_callback: Callable[[], Awaitable[list[JobRecord]]],
         cancel_callback: Callable[[int], Awaitable[JobRecord]],
         set_admin_message_id_callback: Callable[[int, int], Awaitable[JobRecord]],
@@ -225,7 +228,15 @@ class TelegramBotApp:
         magnet = self._extract_magnet(message.text or "")
         if magnet is None:
             return
-        job = await self._enqueue_callback(magnet, chat.id, message.message_id)
+        user = update.effective_user
+        job = await self._enqueue_callback(
+            magnet,
+            chat.id,
+            message.message_id,
+            user.id if user is not None else None,
+            user.username if user is not None else None,
+            user.full_name if user is not None else None,
+        )
         if job is None:
             await self.post_admin_message("<b>Ignored duplicate magnet</b>")
             return

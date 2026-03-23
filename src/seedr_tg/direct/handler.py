@@ -14,6 +14,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ContextTypes
 
+from seedr_tg.db.models import JobPhase
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.downloader import (
     DirectDownloader,
@@ -29,6 +30,7 @@ from seedr_tg.direct.telegram_uploader import (
     DirectTelegramUploader,
     DirectTelegramUploadError,
 )
+from seedr_tg.status.outcome import RequesterIdentity, render_task_outcome_message
 from seedr_tg.status.template import collect_bot_stats, render_operation_status
 
 LOGGER = logging.getLogger(__name__)
@@ -231,6 +233,33 @@ class DirectDownloadCommandHandler:
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=final_name,
+                    size_bytes=downloaded.size_bytes,
+                    elapsed_seconds=int(elapsed),
+                    mode_tags="#Leech | #ytdlp",
+                    total_files=1,
+                    requester=RequesterIdentity(
+                        user_id=update.effective_user.id if update.effective_user else None,
+                        username=(
+                            update.effective_user.username
+                            if update.effective_user
+                            else None
+                        ),
+                        display_name=(
+                            update.effective_user.full_name
+                            if update.effective_user
+                            else None
+                        ),
+                    ),
+                    phase=JobPhase.COMPLETED,
+                    file_names=[final_name],
+                    failure_reason=None,
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         except InvalidDirectUrlError as exc:
             LOGGER.warning(
                 "Direct transfer rejected due to invalid URL url=%s error=%s",
@@ -238,15 +267,119 @@ class DirectDownloadCommandHandler:
                 exc,
             )
             await update_status(step=f"Failed: Invalid URL ({exc})")
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=options.url,
+                    size_bytes=0,
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #ytdlp",
+                    total_files=0,
+                    requester=RequesterIdentity(
+                        user_id=update.effective_user.id if update.effective_user else None,
+                        username=(
+                            update.effective_user.username
+                            if update.effective_user
+                            else None
+                        ),
+                        display_name=(
+                            update.effective_user.full_name
+                            if update.effective_user
+                            else None
+                        ),
+                    ),
+                    phase=JobPhase.FAILED,
+                    failure_reason=f"Invalid URL ({exc})",
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         except DirectTelegramUploadError as exc:
             LOGGER.exception("Direct upload failed for url=%s", options.url)
             await update_status(step=f"Failed: Upload error ({exc})")
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=options.url,
+                    size_bytes=0,
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #ytdlp",
+                    total_files=0,
+                    requester=RequesterIdentity(
+                        user_id=update.effective_user.id if update.effective_user else None,
+                        username=(
+                            update.effective_user.username
+                            if update.effective_user
+                            else None
+                        ),
+                        display_name=(
+                            update.effective_user.full_name
+                            if update.effective_user
+                            else None
+                        ),
+                    ),
+                    phase=JobPhase.FAILED,
+                    failure_reason=f"Upload error ({exc})",
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         except DirectDownloadError as exc:
             LOGGER.exception("Direct download failed for url=%s", options.url)
             await update_status(step=f"Failed: Download error ({exc})")
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=options.url,
+                    size_bytes=0,
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #ytdlp",
+                    total_files=0,
+                    requester=RequesterIdentity(
+                        user_id=update.effective_user.id if update.effective_user else None,
+                        username=(
+                            update.effective_user.username
+                            if update.effective_user
+                            else None
+                        ),
+                        display_name=(
+                            update.effective_user.full_name
+                            if update.effective_user
+                            else None
+                        ),
+                    ),
+                    phase=JobPhase.FAILED,
+                    failure_reason=f"Download error ({exc})",
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         except Exception:
             LOGGER.exception("Unexpected direct transfer error chat_id=%s", chat.id)
             await update_status(step="Failed: Unexpected error")
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=options.url,
+                    size_bytes=0,
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #ytdlp",
+                    total_files=0,
+                    requester=RequesterIdentity(
+                        user_id=update.effective_user.id if update.effective_user else None,
+                        username=(
+                            update.effective_user.username
+                            if update.effective_user
+                            else None
+                        ),
+                        display_name=(
+                            update.effective_user.full_name
+                            if update.effective_user
+                            else None
+                        ),
+                    ),
+                    phase=JobPhase.FAILED,
+                    failure_reason="Unexpected error",
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         finally:
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 

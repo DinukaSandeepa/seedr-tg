@@ -11,6 +11,11 @@ from seedr_tg.db.models import FINAL_PHASES, JobPhase, JobRecord
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.seedr.client import SeedrService
 from seedr_tg.seedr.poller import SeedrPoller
+from seedr_tg.status.outcome import (
+    RequesterIdentity,
+    elapsed_seconds_from_iso,
+    render_task_outcome_message,
+)
 from seedr_tg.status.template import collect_bot_stats
 from seedr_tg.telegram.bot_app import TelegramBotApp
 from seedr_tg.telegram.uploader import TelegramUploader
@@ -56,6 +61,9 @@ class QueueRunner:
         magnet_link: str,
         source_chat_id: int,
         source_message_id: int,
+        created_by_user_id: int | None = None,
+        created_by_username: str | None = None,
+        created_by_display_name: str | None = None,
     ) -> JobRecord | None:
         if await self._repository.has_active_magnet(magnet_link):
             return None
@@ -64,6 +72,9 @@ class QueueRunner:
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             target_chat_id=self._settings.telegram_target_chat_id,
+            created_by_user_id=created_by_user_id,
+            created_by_username=created_by_username,
+            created_by_display_name=created_by_display_name,
         )
         self._wake_event.set()
         return job
@@ -295,6 +306,14 @@ class QueueRunner:
             upload_speed_bps=0.0,
         )
         await self._sync_admin_message(job)
+        await self._post_task_outcome(
+            job,
+            mode_tags="#Leech | #seedr",
+            file_names=[path.name for path in upload_file_paths],
+            fallback_size_bytes=sum(
+                path.stat().st_size for path in upload_file_paths if path.exists()
+            ),
+        )
         await self._repository.renumber_queue()
 
     async def _wait_for_seedr(self, job_id: int, torrent_id: int | None):
@@ -420,6 +439,12 @@ class QueueRunner:
             failure_reason="Cancellation requested",
         )
         await self._sync_admin_message(canceled)
+        await self._post_task_outcome(
+            canceled,
+            mode_tags="#Leech | #seedr",
+            file_names=None,
+            fallback_size_bytes=0,
+        )
         await self._repository.delete_job(job_id)
         await self._repository.renumber_queue()
         raise asyncio.CancelledError(f"Job {job_id} canceled")
@@ -441,6 +466,12 @@ class QueueRunner:
         self._speed_samples.pop((job_id, "download"), None)
         self._speed_samples.pop((job_id, "upload"), None)
         await self._sync_admin_message(failed)
+        await self._post_task_outcome(
+            failed,
+            mode_tags="#Leech | #seedr",
+            file_names=None,
+            fallback_size_bytes=0,
+        )
 
     @staticmethod
     def _format_failure_reason(exc: Exception) -> str:
@@ -563,3 +594,33 @@ class QueueRunner:
             await asyncio.to_thread(shutil.rmtree, job.local_path, True)
         local_root = self._settings.download_root / f"job_{job.id}"
         await asyncio.to_thread(shutil.rmtree, local_root, True)
+
+    async def _post_task_outcome(
+        self,
+        job: JobRecord,
+        *,
+        mode_tags: str,
+        file_names: list[str] | None,
+        fallback_size_bytes: int,
+    ) -> None:
+        try:
+            requester = RequesterIdentity(
+                user_id=job.created_by_user_id,
+                username=job.created_by_username,
+                display_name=job.created_by_display_name,
+            )
+            total_files = len(file_names) if file_names else int(job.upload_file_count or 0)
+            text = render_task_outcome_message(
+                title=job.torrent_name or f"Job #{job.id}",
+                size_bytes=int(job.total_size_bytes or fallback_size_bytes),
+                elapsed_seconds=elapsed_seconds_from_iso(job.created_at),
+                mode_tags=mode_tags,
+                total_files=total_files,
+                requester=requester,
+                phase=job.phase,
+                file_names=file_names,
+                failure_reason=job.failure_reason,
+            )
+            await self._bot_app.post_admin_message(text)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to post task outcome summary for job %s: %s", job.id, exc)

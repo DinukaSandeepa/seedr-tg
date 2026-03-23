@@ -50,9 +50,23 @@ async def run() -> None:
 
     queue_runner: QueueRunner | None = None
 
-    async def enqueue_callback(magnet: str, chat_id: int, message_id: int):
+    async def enqueue_callback(
+        magnet: str,
+        chat_id: int,
+        message_id: int,
+        user_id: int | None,
+        username: str | None,
+        display_name: str | None,
+    ):
         assert queue_runner is not None
-        return await queue_runner.enqueue_magnet(magnet, chat_id, message_id)
+        return await queue_runner.enqueue_magnet(
+            magnet,
+            chat_id,
+            message_id,
+            user_id,
+            username,
+            display_name,
+        )
 
     async def list_jobs_callback():
         assert queue_runner is not None

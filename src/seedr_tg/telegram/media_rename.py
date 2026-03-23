@@ -14,8 +14,10 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import ContextTypes
 
+from seedr_tg.db.models import JobPhase
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
+from seedr_tg.status.outcome import RequesterIdentity, render_task_outcome_message
 from seedr_tg.status.template import (
     collect_bot_stats,
     format_speed_bps,
@@ -67,6 +69,11 @@ class TelegramMediaRenameHandler:
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         chat = update.effective_chat
+        requester = RequesterIdentity(
+            user_id=update.effective_user.id if update.effective_user else None,
+            username=update.effective_user.username if update.effective_user else None,
+            display_name=update.effective_user.full_name if update.effective_user else None,
+        )
         if message is None or chat is None:
             return
         if chat.id not in self._allowed_chat_ids:
@@ -249,12 +256,15 @@ class TelegramMediaRenameHandler:
                         return
 
         try:
+            started_at = time.monotonic()
             if self._task_semaphore.locked():
                 await update_status(step="Waiting for free rename slot")
             async with self._task_semaphore:
                 await self._run_rename_flow(
                     message=message,
                     chat_id=chat.id,
+                    requester=requester,
+                    started_at=started_at,
                     selected_mode=selected_mode,
                     descriptor=descriptor,
                     options=options,
@@ -277,6 +287,20 @@ class TelegramMediaRenameHandler:
                 progress_detail="See logs for traceback.",
                 force=True,
             )
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=descriptor.original_name,
+                    size_bytes=int(descriptor.size_bytes or 0),
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #telegram",
+                    total_files=0,
+                    requester=requester,
+                    phase=JobPhase.FAILED,
+                    failure_reason=str(exc),
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
         finally:
             await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
@@ -285,6 +309,8 @@ class TelegramMediaRenameHandler:
         *,
         message: Message,
         chat_id: int,
+        requester: RequesterIdentity,
+        started_at: float,
         selected_mode: str,
         descriptor: TelegramMediaDescriptor,
         options: MediaRenameOptions,
@@ -472,6 +498,21 @@ class TelegramMediaRenameHandler:
                 final_name=final_name,
                 progress_percent=100.0,
                 force=True,
+            )
+            await message.reply_text(
+                render_task_outcome_message(
+                    title=final_name,
+                    size_bytes=int(final_path.stat().st_size if final_path.exists() else 0),
+                    elapsed_seconds=int(time.monotonic() - started_at),
+                    mode_tags="#Leech | #telegram",
+                    total_files=1,
+                    requester=requester,
+                    phase=JobPhase.COMPLETED,
+                    file_names=[final_name],
+                    failure_reason=None,
+                ),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
             )
         except Exception:
             raise
