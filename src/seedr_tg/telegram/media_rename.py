@@ -135,6 +135,7 @@ class TelegramMediaRenameHandler:
                         message_id=source_message_id,
                         destination=temp_download_path,
                         fallback_file_id=descriptor.file_id,
+                        bot_chat_id=reply_chat_id,
                     )
                 except RuntimeError:
                     if (
@@ -155,6 +156,7 @@ class TelegramMediaRenameHandler:
                         message_id=message.reply_to_message.message_id,
                         destination=temp_download_path,
                         fallback_file_id=descriptor.file_id,
+                        bot_chat_id=reply_chat_id,
                     )
 
             if not downloaded_path.exists() or downloaded_path.stat().st_size <= 0:

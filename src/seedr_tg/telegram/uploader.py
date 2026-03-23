@@ -131,6 +131,7 @@ class TelegramUploader:
             else self._UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES,
         )
         self._client: Client | None = None
+        self._bot_mtproto_client: Client | None = None
         self._pending_login_client: Client | None = None
         self._pending_login_phone_number: str | None = None
         self._bot: Bot | None = None
@@ -195,6 +196,12 @@ class TelegramUploader:
                 await self._pending_login_client.disconnect()
             self._pending_login_client = None
             self._pending_login_phone_number = None
+        if self._bot_mtproto_client is not None:
+            with contextlib.suppress(Exception):
+                await self._bot_mtproto_client.stop()
+            with contextlib.suppress(Exception):
+                await self._bot_mtproto_client.disconnect()
+            self._bot_mtproto_client = None
         if self._client is not None:
             with contextlib.suppress(Exception):
                 await self._client.disconnect()
@@ -301,10 +308,61 @@ class TelegramUploader:
         message_id: int,
         destination: Path,
         fallback_file_id: str | None = None,
+        bot_chat_id: int | None = None,
     ) -> Path:
-        """Download media from a Telegram message via MTProto (Kurigram)."""
-        client = await self._get_client()
+        """Download media from a Telegram message via MTProto (Kurigram).
+
+        Tries bot-authenticated MTProto first for bot-PM media (if `bot_chat_id`
+        is supplied), then falls back to user-authenticated MTProto session.
+        """
         destination.parent.mkdir(parents=True, exist_ok=True)
+        clients_to_try: list[tuple[str, Client, int]] = []
+
+        if bot_chat_id is not None:
+            bot_client = await self._get_bot_mtproto_client()
+            clients_to_try.append(("bot", bot_client, int(bot_chat_id)))
+
+        user_client = await self._get_client()
+        clients_to_try.append(("user", user_client, int(chat_id)))
+
+        last_error: Exception | None = None
+        for client_kind, client, effective_chat_id in clients_to_try:
+            try:
+                return await self._download_media_with_client(
+                    client=client,
+                    chat_id=effective_chat_id,
+                    message_id=message_id,
+                    destination=destination,
+                    fallback_file_id=fallback_file_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                LOGGER.warning(
+                    (
+                        "MTProto media download attempt failed via %s client "
+                        "chat_id=%s message_id=%s error=%s"
+                    ),
+                    client_kind,
+                    effective_chat_id,
+                    message_id,
+                    exc,
+                )
+
+        if last_error is not None:
+            raise RuntimeError(
+                "Unable to download replied Telegram media via MTProto."
+            ) from last_error
+        raise RuntimeError("Unable to download replied Telegram media via MTProto.")
+
+    async def _download_media_with_client(
+        self,
+        *,
+        client: Client,
+        chat_id: int,
+        message_id: int,
+        destination: Path,
+        fallback_file_id: str | None,
+    ) -> Path:
         media_fields = (
             "document",
             "video",
@@ -376,6 +434,33 @@ class TelegramUploader:
         raise RuntimeError(
             "Unable to download replied Telegram media via MTProto or downloaded file is empty."
         )
+
+    async def _get_bot_mtproto_client(self) -> Client:
+        if (
+            self._bot_mtproto_client is not None
+            and self._is_client_connected(self._bot_mtproto_client)
+        ):
+            return self._bot_mtproto_client
+
+        client = Client(
+            name="seedr_tg_bot_media",
+            api_id=self._api_id,
+            api_hash=self._api_hash,
+            bot_token=self._bot_token,
+            in_memory=True,
+            no_updates=True,
+        )
+        await client.start()
+        try:
+            await client.get_me()
+        except Exception:
+            with contextlib.suppress(Exception):
+                await client.stop()
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            raise
+        self._bot_mtproto_client = client
+        return client
 
     async def _prime_mtproto_peer_cache(self, client: Client, *, chat_id: int) -> None:
         """Populate Kurigram peer cache so numeric chat ids can resolve."""
