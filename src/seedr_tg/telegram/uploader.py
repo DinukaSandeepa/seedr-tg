@@ -1168,6 +1168,12 @@ class TelegramUploader:
                     raise RuntimeError(
                         f"Telegram rejected empty upload payload: {file_path}"
                     ) from exc
+                if self._is_bot_payload_too_large_error(exc):
+                    LOGGER.warning(
+                        "Bot API rejected upload payload as too large; skipping retries and "
+                        "falling back to MTProto"
+                    )
+                    break
                 if isinstance(exc, TimedOut | NetworkError | TimeoutError | OSError):
                     await self._reset_bot_client_for_retry(exc)
                 backoff = min(
@@ -1519,6 +1525,16 @@ class TelegramUploader:
             return True
         name = exc.__class__.__name__.lower()
         return any(token in name for token in ("timeout", "connection", "rpc", "server"))
+
+    @staticmethod
+    def _is_bot_payload_too_large_error(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return (
+            "request entity too large" in text
+            or "entity too large" in text
+            or "payload too large" in text
+            or "413" in text
+        )
 
     @staticmethod
     def _resolve_pyrogram_parse_mode(parse_mode: str | None) -> str | None:
