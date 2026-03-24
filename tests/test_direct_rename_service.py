@@ -89,3 +89,33 @@ def test_invalid_rename_output_falls_back_to_safe_original(tmp_path):
     )
 
     assert result == "safe_name.mp4"
+
+
+def test_auto_strips_leading_1tamilmv_domain_prefix(tmp_path):
+    renamer = FilenameRenamer(max_filename_bytes=255)
+
+    result = renamer.build_name(
+        original_name="www.1TamilMV.immo - Sabdham (2025) Tamil HQ HDRip - x264 - AAC - 400MB - ESub.mkv",
+        request=RenameRequest(),
+        target_directory=tmp_path,
+    )
+
+    assert result == "Sabdham (2025) Tamil HQ HDRip - x264 - AAC - 400MB - ESub.mkv"
+
+
+def test_auto_strips_leading_1tamilmv_prefix_for_other_domains(tmp_path):
+    renamer = FilenameRenamer(max_filename_bytes=255)
+
+    io_result = renamer.build_name(
+        original_name="www.1TamilMV.io - Movie Title (2026).mp4",
+        request=RenameRequest(),
+        target_directory=tmp_path,
+    )
+    com_result = renamer.build_name(
+        original_name="www.1TamilMV.com - Another Title (2024).mkv",
+        request=RenameRequest(),
+        target_directory=tmp_path,
+    )
+
+    assert io_result == "Movie Title (2026).mp4"
+    assert com_result == "Another Title (2024).mkv"

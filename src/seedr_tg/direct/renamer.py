@@ -6,6 +6,10 @@ from pathlib import Path
 
 _INVALID_FILENAME_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
 _WHITESPACE = re.compile(r"\s+")
+_LEADING_1TAMILMV_PREFIX = re.compile(
+    r"^\s*(?:www\.)?1tamilmv\.[a-z0-9.-]+\s*[-_]+\s*",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -42,6 +46,7 @@ class FilenameRenamer:
         """Build a Telegram-safe filename and resolve duplicate names in target_directory."""
         safe_original = self.sanitize_filename(original_name)
         original_stem, extension = self._split_name(safe_original)
+        original_stem = self._remove_leading_release_site_prefix(original_stem)
 
         stem = original_stem
         if request.explicit_name:
@@ -75,6 +80,11 @@ class FilenameRenamer:
                 normalized_name = self._limit_bytes(f"file{extension}")
 
         return self._ensure_unique_name(normalized_name, extension, target_directory)
+
+    @staticmethod
+    def _remove_leading_release_site_prefix(stem: str) -> str:
+        cleaned = _LEADING_1TAMILMV_PREFIX.sub("", stem).strip(" .")
+        return cleaned if cleaned else stem
 
     @staticmethod
     def sanitize_filename(value: str, fallback: str = "file") -> str:
