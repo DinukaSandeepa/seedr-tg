@@ -35,6 +35,7 @@ from seedr_tg.db.models import (
     TelegramUserSession,
     UploadMediaType,
     UploadSettings,
+    UserSettings,
 )
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.status.template import (
@@ -691,6 +692,7 @@ class TelegramUploader:
         caption_prefix: str,
         job_id: int | None = None,
         upload_settings: UploadSettings | None = None,
+        user_settings: UserSettings | None = None,
         progress_hook: Callable[[int, int, str, int, int], Awaitable[None]] | None = None,
         max_concurrent_uploads: int = 1,
         upload_part_size_kb: int = 512,
@@ -781,9 +783,10 @@ class TelegramUploader:
                 caption_prefix=caption_prefix,
                 job_id=job_id,
                 upload_settings=upload_settings,
+                user_settings=user_settings,
                 display_filename=telegram_filename,
             )
-            thumb_path = self._resolve_thumbnail_path(upload_settings)
+            thumb_path = self._resolve_thumbnail_path(upload_settings, user_settings)
             upload_payload: dict[str, Any] = {
                 "chat_id": self._target_chat_id,
                 "file_path": str(file_path),
@@ -1542,14 +1545,36 @@ class TelegramUploader:
                 LOGGER.warning("Upload progress callback failed: %s", exc)
 
     @staticmethod
-    def _resolve_thumbnail_path(upload_settings: UploadSettings | None) -> Path | None:
-        if upload_settings is None or not upload_settings.thumbnail_local_path:
-            return None
-        path = Path(upload_settings.thumbnail_local_path)
-        if not path.exists():
-            LOGGER.warning("Configured thumbnail not found at %s; sending without thumbnail", path)
-            return None
-        return path
+    def _resolve_thumbnail_path(
+        upload_settings: UploadSettings | None,
+        user_settings: UserSettings | None = None,
+    ) -> Path | None:
+        thumbnails_dir = Path("downloads") / "thumbnails"
+        thumbnails_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check user settings first
+        if user_settings and (user_settings.thumbnail_bytes or user_settings.thumbnail_file_id):
+            if user_settings.thumbnail_bytes:
+                # Reconstruct from DB bytes
+                path = thumbnails_dir / f"user_{user_settings.user_id}.jpg"
+                if not path.exists():
+                    path.write_bytes(user_settings.thumbnail_bytes)
+                return path
+
+        # Fallback to global settings
+        if upload_settings and (upload_settings.thumbnail_bytes or upload_settings.thumbnail_local_path):
+            if upload_settings.thumbnail_bytes:
+                # Reconstruct from DB bytes
+                path = thumbnails_dir / "global.jpg"
+                if not path.exists():
+                    path.write_bytes(upload_settings.thumbnail_bytes)
+                return path
+            if upload_settings.thumbnail_local_path:
+                path = Path(upload_settings.thumbnail_local_path)
+                if path.exists():
+                    return path
+
+        return None
 
     @staticmethod
     def _render_caption(
@@ -1558,16 +1583,25 @@ class TelegramUploader:
         caption_prefix: str,
         job_id: int | None,
         upload_settings: UploadSettings | None,
+        user_settings: UserSettings | None = None,
         display_filename: str | None = None,
     ) -> tuple[str, str | None]:
         filename = display_filename or file_path.name
-        if upload_settings is None or not upload_settings.caption_template:
+        
+        template = None
+        if user_settings and user_settings.caption_template:
+            template = user_settings.caption_template
+        elif upload_settings and upload_settings.caption_template:
+            template = upload_settings.caption_template
+
+        if not template:
             return f"{caption_prefix}\n{filename}", None
-        template = upload_settings.caption_template
+            
+        parse_mode = upload_settings.caption_parse_mode if upload_settings else CaptionParseMode.HTML
         include_filename_prefix = "{filename}" not in template
         template_filename = filename
         template_torrent_name = caption_prefix
-        if upload_settings.caption_parse_mode == CaptionParseMode.HTML:
+        if parse_mode == CaptionParseMode.HTML:
             template_filename = escape(filename)
             template_torrent_name = escape(caption_prefix)
         try:

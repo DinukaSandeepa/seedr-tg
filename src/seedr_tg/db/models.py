@@ -104,5 +104,16 @@ class UploadSettings:
     caption_parse_mode: CaptionParseMode
     thumbnail_file_id: str | None
     thumbnail_local_path: str | None
+    thumbnail_bytes: bytes | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class UserSettings:
+    user_id: int
+    caption_template: str | None
+    thumbnail_file_id: str | None
+    thumbnail_bytes: bytes | None
     created_at: str
     updated_at: str

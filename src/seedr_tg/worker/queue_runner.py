@@ -274,11 +274,19 @@ class QueueRunner:
                 total_bytes,
             )
 
+        upload_settings = await self._repository.get_upload_settings()
+        user_settings = (
+            await self._repository.get_user_settings(job.created_by_user_id)
+            if job.created_by_user_id
+            else None
+        )
+
         await self._uploader.upload_files(
             upload_file_paths,
             caption_prefix=snapshot.title or f"Job {job.id}",
             job_id=job.id,
-            upload_settings=await self._repository.get_upload_settings(),
+            upload_settings=upload_settings,
+            user_settings=user_settings,
             max_concurrent_uploads=self._settings.upload_concurrency,
             upload_part_size_kb=self._settings.upload_part_size_kb,
             upload_max_retries=self._settings.upload_max_retries,

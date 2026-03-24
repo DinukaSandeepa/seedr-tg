@@ -116,6 +116,12 @@ async def run() -> None:
     async def reset_upload_settings_callback():
         return await repository.reset_upload_settings()
 
+    async def get_user_settings_callback(user_id: int):
+        return await repository.get_user_settings(user_id)
+
+    async def update_user_settings_callback(user_id: int, **kwargs):
+        return await repository.update_user_settings(user_id, **kwargs)
+
     async def get_authorized_chat_ids_callback():
         return await repository.get_authorized_chat_ids()
 
@@ -161,6 +167,8 @@ async def run() -> None:
         get_upload_settings_callback=get_upload_settings_callback,
         update_upload_settings_callback=update_upload_settings_callback,
         reset_upload_settings_callback=reset_upload_settings_callback,
+        get_user_settings_callback=get_user_settings_callback,
+        update_user_settings_callback=update_user_settings_callback,
         get_authorized_chat_ids_callback=get_authorized_chat_ids_callback,
         authorize_chat_callback=authorize_chat_callback,
         direct_download_handler=direct_download_handler,

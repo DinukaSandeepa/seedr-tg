@@ -31,6 +31,7 @@ from seedr_tg.db.models import (
     TelegramUserSession,
     UploadMediaType,
     UploadSettings,
+    UserSettings,
 )
 from seedr_tg.status.template import collect_bot_stats
 from seedr_tg.status.unified import ActiveTaskSnapshot
@@ -82,6 +83,8 @@ class TelegramBotApp:
         get_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
         update_upload_settings_callback: Callable[..., Awaitable[UploadSettings]],
         reset_upload_settings_callback: Callable[[], Awaitable[UploadSettings]],
+        get_user_settings_callback: Callable[[int], Awaitable[UserSettings]],
+        update_user_settings_callback: Callable[..., Awaitable[UserSettings]],
         get_authorized_chat_ids_callback: Callable[[], Awaitable[set[int]]],
         authorize_chat_callback: Callable[[int], Awaitable[set[int]]],
         direct_download_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]],
@@ -106,6 +109,8 @@ class TelegramBotApp:
         self._get_upload_settings_callback = get_upload_settings_callback
         self._update_upload_settings_callback = update_upload_settings_callback
         self._reset_upload_settings_callback = reset_upload_settings_callback
+        self._get_user_settings_callback = get_user_settings_callback
+        self._update_user_settings_callback = update_user_settings_callback
         self._get_authorized_chat_ids_callback = get_authorized_chat_ids_callback
         self._authorize_chat_callback = authorize_chat_callback
         self._status_download_dir = status_download_dir
@@ -115,6 +120,7 @@ class TelegramBotApp:
         self._admin_message_cache: dict[tuple[int, int], tuple[str, int | None]] = {}
         self._admin_message_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._pending_settings_action: dict[int, str] = {}
+        self._pending_user_settings_action: dict[int, str] = {}
         self._status_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._queue_status_message_ids: dict[int, int] = {}
         self._queue_status_filters: dict[int, StatusFilter] = {}
@@ -144,8 +150,12 @@ class TelegramBotApp:
         self._application.add_handler(CommandHandler("rename", telegram_media_rename_handler))
         self._application.add_handler(CommandHandler("cancel", self._cancel_command))
         self._application.add_handler(CommandHandler("settings", self._settings))
+        self._application.add_handler(CommandHandler("mysettings", self._mysettings))
         self._application.add_handler(
             CallbackQueryHandler(self._handle_settings_callback, pattern=r"^settings:")
+        )
+        self._application.add_handler(
+            CallbackQueryHandler(self._handle_mysettings_callback, pattern=r"^mysettings:")
         )
         self._application.add_handler(
             CallbackQueryHandler(self._handle_cancel, pattern=r"^cancel:.+$")
@@ -162,6 +172,12 @@ class TelegramBotApp:
                 & ~filters.COMMAND
                 & (filters.TEXT | filters.PHOTO | filters.Document.IMAGE),
                 self._handle_admin_settings_input,
+            )
+        )
+        self._application.add_handler(
+            MessageHandler(
+                ~filters.COMMAND & (filters.TEXT | filters.PHOTO | filters.Document.IMAGE),
+                self._handle_user_settings_input,
             )
         )
 
@@ -1007,6 +1023,7 @@ class TelegramBotApp:
             await self._update_upload_settings_callback(
                 thumbnail_file_id=None,
                 thumbnail_local_path=None,
+                thumbnail_bytes=None,
             )
             await self._refresh_settings_message(query)
             return
@@ -1055,9 +1072,13 @@ class TelegramBotApp:
             thumbnails_dir.mkdir(parents=True, exist_ok=True)
             local_path = thumbnails_dir / f"custom_thumbnail{suffix}"
             await telegram_file.download_to_drive(custom_path=str(local_path))
+            
+            thumbnail_bytes = await telegram_file.download_as_bytearray()
+            
             await self._update_upload_settings_callback(
                 thumbnail_file_id=file_id,
                 thumbnail_local_path=str(local_path),
+                thumbnail_bytes=bytes(thumbnail_bytes),
             )
             self._pending_settings_action.pop(chat.id, None)
             await message.reply_text("Custom thumbnail saved.")
@@ -1240,6 +1261,152 @@ class TelegramBotApp:
                 [
                     InlineKeyboardButton("Reset Defaults", callback_data="settings:reset"),
                     InlineKeyboardButton("Refresh", callback_data="settings:refresh"),
+                ],
+            ]
+        )
+
+    async def _mysettings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if user is None:
+            return
+        settings = await self._get_user_settings_callback(user.id)
+        await update.message.reply_text(
+            text=self._format_user_settings_text(settings),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._user_settings_keyboard(),
+        )
+
+    async def _handle_mysettings_callback(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        user_id = query.from_user.id
+        await query.answer()
+
+        action = query.data.split(":", 1)[1]
+        
+        if action == "caption_set":
+            self._pending_user_settings_action[user_id] = SETTINGS_ACTION_CAPTION
+            await query.message.reply_text(
+                "Send the custom caption text. Available placeholders:\n"
+                "{filename}, {torrent_name}, {job_id}"
+            )
+            return
+        if action == "caption_clear":
+            await self._update_user_settings_callback(user_id=user_id, caption_template=None)
+            await self._refresh_mysettings_message(query, user_id)
+            return
+
+        if action == "thumb_set":
+            self._pending_user_settings_action[user_id] = SETTINGS_ACTION_THUMBNAIL
+            await query.message.reply_text("Send the thumbnail as a photo or image document now.")
+            return
+        if action == "thumb_clear":
+            await self._update_user_settings_callback(
+                user_id=user_id,
+                thumbnail_file_id=None,
+                thumbnail_bytes=None,
+            )
+            await self._refresh_mysettings_message(query, user_id)
+            return
+        if action == "refresh":
+            await self._refresh_mysettings_message(query, user_id)
+            return
+
+    async def _handle_user_settings_input(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None:
+            return
+        pending = self._pending_user_settings_action.get(user.id)
+        if pending is None:
+            return
+
+        if pending == SETTINGS_ACTION_CAPTION:
+            if not message.text:
+                await message.reply_text("Send caption text as plain message.")
+                return
+            await self._update_user_settings_callback(user_id=user.id, caption_template=message.text.strip())
+            self._pending_user_settings_action.pop(user.id, None)
+            await message.reply_text("Your custom caption saved.")
+            return
+
+        if pending == SETTINGS_ACTION_THUMBNAIL:
+            image = None
+            file_id = None
+            suffix = ".jpg"
+            if message.photo:
+                image = message.photo[-1]
+                file_id = image.file_id
+            elif message.document and (message.document.mime_type or "").startswith("image/"):
+                image = message.document
+                file_id = image.file_id
+                if image.file_name and "." in image.file_name:
+                    suffix = Path(image.file_name).suffix or suffix
+            
+            if image is None or file_id is None:
+                await message.reply_text("Send a photo or image document for thumbnail.")
+                return
+
+            telegram_file = await image.get_file()
+            thumbnail_bytes = await telegram_file.download_as_bytearray()
+            
+            await self._update_user_settings_callback(
+                user_id=user.id,
+                thumbnail_file_id=file_id,
+                thumbnail_bytes=bytes(thumbnail_bytes),
+            )
+            self._pending_user_settings_action.pop(user.id, None)
+            await message.reply_text("Your custom thumbnail saved.")
+
+    async def _refresh_mysettings_message(self, query, user_id: int) -> None:
+        settings = await self._get_user_settings_callback(user_id)
+        await query.edit_message_text(
+            text=self._format_user_settings_text(settings),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._user_settings_keyboard(),
+        )
+
+    @staticmethod
+    def _format_user_settings_text(settings: UserSettings) -> str:
+        caption_disp = (
+            escape(settings.caption_template)
+            if settings.caption_template
+            else "<i>Not set (Using Global)</i>"
+        )
+        thumb_disp = (
+            "Set (Custom)"
+            if settings.thumbnail_bytes or settings.thumbnail_file_id
+            else "<i>Not set (Using Global)</i>"
+        )
+        return (
+            "<b>Your User Settings</b>\n\n"
+            f"<b>Caption:</b>\n{caption_disp}\n\n"
+            f"<b>Thumbnail:</b> {thumb_disp}\n"
+        )
+
+    @staticmethod
+    def _user_settings_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Set Caption", callback_data="mysettings:caption_set"),
+                    InlineKeyboardButton("Clear Caption", callback_data="mysettings:caption_clear"),
+                ],
+                [
+                    InlineKeyboardButton("Set Thumbnail", callback_data="mysettings:thumb_set"),
+                    InlineKeyboardButton("Clear Thumbnail", callback_data="mysettings:thumb_clear"),
+                ],
+                [
+                    InlineKeyboardButton("Refresh", callback_data="mysettings:refresh"),
                 ],
             ]
         )
