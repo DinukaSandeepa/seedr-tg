@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from seedr_tg.seedr.client import SeedrMaxTorrentSizeError, SeedrService
 from seedr_tg.worker.queue_runner import QueueRunner
 
 
@@ -55,3 +56,27 @@ async def test_add_seedr_torrent_for_job_uses_torrent_file_and_deletes_temp(tmp_
     assert fake_seedr.add_magnet_calls == []
     assert fake_seedr.add_torrent_file_calls == [torrent_file]
     assert not torrent_file.exists()
+
+
+def test_format_failure_reason_returns_plain_seedr_limit_warning():
+    format_reason = getattr(QueueRunner, "_format_failure_reason")
+    reason = format_reason(
+        SeedrMaxTorrentSizeError(
+            "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+        )
+    )
+
+    assert reason == "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+
+
+@pytest.mark.asyncio
+async def test_ensure_under_limit_raises_human_readable_4gb_warning():
+    service = SeedrService.__new__(SeedrService)
+    object.__setattr__(
+        service,
+        "_settings",
+        SimpleNamespace(max_seedr_file_size_bytes=4 * 1024 * 1024 * 1024),
+    )
+
+    with pytest.raises(SeedrMaxTorrentSizeError, match="up to 4GB only"):
+        await service.ensure_under_limit((4 * 1024 * 1024 * 1024) + 1)

@@ -12,7 +12,7 @@ from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from seedr_tg.config import Settings
 from seedr_tg.db.models import FINAL_PHASES, JobPhase, JobRecord
 from seedr_tg.db.repository import JobRepository
-from seedr_tg.seedr.client import SeedrService
+from seedr_tg.seedr.client import SeedrMaxTorrentSizeError, SeedrService
 from seedr_tg.seedr.poller import SeedrPoller
 from seedr_tg.status.outcome import (
     RequesterIdentity,
@@ -535,6 +535,8 @@ class QueueRunner:
 
     @staticmethod
     def _format_failure_reason(exc: Exception) -> str:
+        if isinstance(exc, SeedrMaxTorrentSizeError):
+            return str(exc)
         message = str(exc).strip()
         if message:
             return f"{exc.__class__.__name__}: {message}"

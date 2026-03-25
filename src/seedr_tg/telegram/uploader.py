@@ -53,6 +53,7 @@ _LEADING_1TAMILMV_PREFIX = re.compile(
     r"^\s*(?:www\.)?1tamilmv\.[a-z0-9.-]+\s*[-_]+\s*",
     re.IGNORECASE,
 )
+_CAPTION_PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 try:
     from pyrogram.errors import FloodPremiumWait
 
@@ -1622,26 +1623,26 @@ class TelegramUploader:
         if not template:
             return f"{caption_prefix}\n{filename}", None
             
-        parse_mode = upload_settings.caption_parse_mode if upload_settings else CaptionParseMode.HTML
-        include_filename_prefix = "{filename}" not in template
+        parse_mode_setting = (
+            upload_settings.caption_parse_mode if upload_settings else CaptionParseMode.HTML
+        )
+        include_filename_prefix = "{filename}" not in template and "{file_name}" not in template
         template_filename = filename
         template_torrent_name = caption_prefix
-        if parse_mode == CaptionParseMode.HTML:
+        if parse_mode_setting == CaptionParseMode.HTML:
             template_filename = escape(filename)
             template_torrent_name = escape(caption_prefix)
-        try:
-            rendered = template.format(
-                filename=template_filename,
-                torrent_name=template_torrent_name,
-                job_id=job_id if job_id is not None else "",
-            )
-        except (KeyError, ValueError) as exc:
-            LOGGER.warning("Invalid caption template, using fallback caption: %s", exc)
-            return f"{caption_prefix}\n{filename}", None
+
+        rendered = TelegramUploader._render_caption_template(
+            template=template,
+            filename=template_filename,
+            torrent_name=template_torrent_name,
+            job_id=job_id,
+        )
         parse_mode = "html"
-        if upload_settings.caption_parse_mode == CaptionParseMode.MARKDOWN_V2:
+        if parse_mode_setting == CaptionParseMode.MARKDOWN_V2:
             parse_mode = "md"
-        if upload_settings.caption_parse_mode == CaptionParseMode.HTML:
+        if parse_mode_setting == CaptionParseMode.HTML:
             if include_filename_prefix:
                 safe_filename = escape(filename)
                 return f"{safe_filename}\n{rendered}", parse_mode
@@ -1649,6 +1650,31 @@ class TelegramUploader:
         if include_filename_prefix:
             return f"{filename}\n{rendered}", parse_mode
         return rendered, parse_mode
+
+    @staticmethod
+    def _render_caption_template(
+        *,
+        template: str,
+        filename: str,
+        torrent_name: str,
+        job_id: int | None,
+    ) -> str:
+        replacements = {
+            "filename": filename,
+            "file_name": filename,
+            "name": filename,
+            "torrent_name": torrent_name,
+            "torrent": torrent_name,
+            "title": torrent_name,
+            "job_id": "" if job_id is None else str(job_id),
+            "job": "" if job_id is None else str(job_id),
+        }
+
+        def replace_match(match: re.Match[str]) -> str:
+            key = match.group(1)
+            return replacements.get(key, match.group(0))
+
+        return _CAPTION_PLACEHOLDER_PATTERN.sub(replace_match, template)
 
     @staticmethod
     def _build_telegram_filename(filename: str) -> str:

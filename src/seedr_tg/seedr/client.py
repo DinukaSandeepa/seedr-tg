@@ -42,6 +42,10 @@ class DownloadIntegrityError(RuntimeError):
     pass
 
 
+class SeedrMaxTorrentSizeError(ValueError):
+    pass
+
+
 class SeedrService:
     _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 
@@ -112,6 +116,10 @@ class SeedrService:
             result = await client.add_torrent(magnet_link=magnet_link)
             return result.user_torrent_id
         except APIError as exc:
+            if self._is_torrent_size_limit_error(exc):
+                raise SeedrMaxTorrentSizeError(
+                    "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+                ) from exc
             if not self._is_storage_related_api_error(exc):
                 raise
             LOGGER.warning(
@@ -145,6 +153,10 @@ class SeedrService:
             result = await client.add_torrent(torrent_file=str(file_path))
             return result.user_torrent_id
         except APIError as exc:
+            if self._is_torrent_size_limit_error(exc):
+                raise SeedrMaxTorrentSizeError(
+                    "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+                ) from exc
             if not self._is_storage_related_api_error(exc):
                 raise
             LOGGER.warning(
@@ -250,10 +262,9 @@ class SeedrService:
         if total_size_bytes is None:
             return
         if total_size_bytes > self._settings.max_seedr_file_size_bytes:
-            raise ValueError(
-                "Torrent size "
-                f"{total_size_bytes} exceeds "
-                f"{self._settings.max_seedr_file_size_bytes}"
+            limit_gb = self._settings.max_seedr_file_size_bytes / (1024**3)
+            raise SeedrMaxTorrentSizeError(
+                f"Seedr accepts torrents/magnets up to {limit_gb:.0f}GB only. Please use a source <= {limit_gb:.0f}GB."
             )
 
     async def download_file(
@@ -549,6 +560,32 @@ class SeedrService:
         if isinstance(code, int) and code in {9, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
             return True
         return False
+
+    @staticmethod
+    def _is_torrent_size_limit_error(exc: APIError) -> bool:
+        payload = SeedrService._api_error_text(exc)
+        return (
+            ("4gb" in payload or "4 gb" in payload or "4294967296" in payload)
+            and any(token in payload for token in ("torrent", "magnet", "size", "large", "limit"))
+        )
+
+    @staticmethod
+    def _api_error_text(exc: APIError) -> str:
+        parts: list[str] = [str(exc)]
+        response = getattr(exc, "response", None)
+        if response is not None:
+            text = getattr(response, "text", None)
+            if isinstance(text, str) and text:
+                parts.append(text)
+            json_payload = None
+            with contextlib.suppress(Exception):
+                json_payload = response.json()
+            if isinstance(json_payload, dict):
+                for key in ("error", "message", "details"):
+                    value = json_payload.get(key)
+                    if isinstance(value, str) and value:
+                        parts.append(value)
+        return " ".join(parts).lower()
 
     async def _cleanup_seedr_storage(self, *, exclude_active_jobs: bool) -> int:
         client = await self._get_client()
