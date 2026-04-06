@@ -100,6 +100,7 @@ class TelegramUploader:
     _UPLOAD_SPLIT_FFPROBE_BINARY = "ffprobe"
     _UPLOAD_HYBRID_MODE = True
     _FLOOD_WAIT_SAFETY_MULTIPLIER = 1.08
+    _UPLOAD_PROGRESS_EMIT_MIN_INTERVAL_SECONDS = 2.0
     _VIDEO_EXTENSIONS = {
         ".mp4",
         ".mkv",
@@ -739,7 +740,10 @@ class TelegramUploader:
                 if progress_hook is None:
                     return
                 now = time.monotonic()
-                if current < total and (now - last_emit) < 1.0:
+                if (
+                    current < total
+                    and (now - last_emit) < self._UPLOAD_PROGRESS_EMIT_MIN_INTERVAL_SECONDS
+                ):
                     return
                 last_emit = now
                 if (

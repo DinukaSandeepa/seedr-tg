@@ -438,11 +438,14 @@ class QueueRunner:
             file_fraction = min(1.0, max(0.0, current_bytes / total_bytes))
         overall_units = completed_files + file_fraction
         percent = (overall_units / total_files) * 100 if total_files else 100.0
-        upload_speed_bps = self._compute_speed(
-            job_id,
-            "upload",
-            current_bytes,
-        )
+        should_sync = self._should_sync_progress(job_id, JobPhase.UPLOADING_TELEGRAM, percent)
+        is_file_boundary = total_bytes > 0 and current_bytes >= total_bytes
+        should_persist = should_sync or is_file_boundary or percent >= 100.0
+        if not should_persist:
+            await self._check_cancellation(job_id)
+            return
+
+        upload_speed_bps = self._compute_speed(job_id, "upload", current_bytes)
         job = await self._transition(
             job_id,
             phase=JobPhase.UPLOADING_TELEGRAM,
@@ -452,7 +455,7 @@ class QueueRunner:
             upload_speed_bps=upload_speed_bps,
             current_step=detail,
         )
-        if self._should_sync_progress(job_id, JobPhase.UPLOADING_TELEGRAM, percent):
+        if should_sync or is_file_boundary or percent >= 100.0:
             await self._sync_admin_message_best_effort(job)
         await self._check_cancellation(job_id)
 
