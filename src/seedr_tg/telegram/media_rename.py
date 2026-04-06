@@ -421,6 +421,11 @@ class TelegramMediaRenameHandler:
             await ensure_not_canceled()
 
             upload_settings = await self._repository.get_upload_settings()
+            user_settings = (
+                await self._repository.get_user_settings(requester.user_id)
+                if requester.user_id is not None
+                else None
+            )
             speed_samples.pop("upload", None)
 
             async def upload_progress_hook(
@@ -456,6 +461,7 @@ class TelegramMediaRenameHandler:
                 [final_path],
                 caption_prefix="Telegram media rename",
                 upload_settings=upload_settings,
+                user_settings=user_settings,
                 max_concurrent_uploads=1,
                 progress_hook=upload_progress_hook,
             )
