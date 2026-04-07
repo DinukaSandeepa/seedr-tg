@@ -35,11 +35,11 @@ class Settings(BaseSettings):
     seedr_active_concurrency: int = 1
     rename_concurrency: int = 2
     download_concurrency: int = 4
-    upload_concurrency: int = 2
+    upload_concurrency: int = 3
     upload_part_size_kb: int = 512
     upload_governor_enabled: bool = True
     upload_governor_min_concurrency: int = 1
-    upload_governor_scale_up_after_stable_files: int = 6
+    upload_governor_scale_up_after_stable_files: int = 3
     upload_hybrid_mode: bool = True
     upload_split_enabled: bool = True
     upload_split_size_bytes: int = 1_992_294_400

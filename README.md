@@ -59,6 +59,8 @@ All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` t
 Hardcoded upload pipeline values:
 
 - `UPLOAD_HYBRID_MODE=true`
+- `UPLOAD_CONCURRENCY=3`
+- `UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES=3`
 - `UPLOAD_SPLIT_ENABLED=true`
 - `UPLOAD_SPLIT_SIZE_BYTES=1992294400`
 - `UPLOAD_SPLIT_USE_FFMPEG_FOR_VIDEO=true`
