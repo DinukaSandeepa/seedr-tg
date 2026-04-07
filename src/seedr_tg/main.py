@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import os
 import signal
 import time
 
@@ -20,6 +21,16 @@ from seedr_tg.telegram.media_rename import TelegramMediaRenameHandler
 from seedr_tg.telegram.uploader import TelegramUploader
 from seedr_tg.web.api import WebApiConfig, WebApiServer
 from seedr_tg.worker.queue_runner import QueueRunner
+
+
+def _resolve_web_api_bind() -> tuple[str, int]:
+    heroku_port = os.getenv("PORT")
+    if not heroku_port:
+        return ("127.0.0.1", 8787)
+    try:
+        return ("0.0.0.0", int(heroku_port))
+    except ValueError:
+        return ("127.0.0.1", 8787)
 
 
 async def run() -> None:
@@ -231,10 +242,15 @@ async def run() -> None:
         uploader=uploader,
         bot_start_time=bot_start_time,
     )
+    web_api_host, web_api_port = _resolve_web_api_bind()
     web_api = WebApiServer(
         enqueue_callback=queue_runner.enqueue_magnet,
         list_jobs_callback=queue_runner.list_jobs,
-        config=WebApiConfig(allowed_origins=settings.web_api_allowed_origins),
+        config=WebApiConfig(
+            host=web_api_host,
+            port=web_api_port,
+            allowed_origins=settings.web_api_allowed_origins,
+        ),
     )
 
     stop_event = asyncio.Event()

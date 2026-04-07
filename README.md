@@ -2,6 +2,8 @@
 
 Async Seedr.cc to Telegram relay service for a single channel and single Seedr account.
 
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/DinukaSandeepa/seedr-tg)
+
 ## What it does
 
 1. Watches one configured Telegram source chat for magnet links.
@@ -30,6 +32,25 @@ Copy `.env.example` to `.env` and fill these values:
 - `WEB_API_ALLOWED_ORIGINS`: Comma-separated list of browser origins allowed to call the web API (for example your Vercel frontend URL).
 - `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
 - `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
+
+## Heroku One-Click Deploy
+
+Use the **Deploy to Heroku** button above, or open:
+
+`https://heroku.com/deploy?template=https://github.com/DinukaSandeepa/seedr-tg`
+
+Heroku app setup checklist:
+
+1. Fill all required config vars shown in the deploy form (especially Telegram IDs/tokens and `MONGODB_URI`).
+2. Keep the default `web` process enabled (defined in `Procfile`).
+3. Finish deployment, then open app logs to confirm boot and bot startup.
+4. In your Telegram admin chat, run `/seedr_auth` and `/seedr_auth_done` if no `SEEDR_TOKEN_JSON` was provided.
+5. In the admin chat, run `/session_start <phone>`, `/session_code <code>`, and `/session_password <password>` (if required) if no `TELEGRAM_USER_SESSION_STRING` was provided.
+
+Notes:
+
+- The app auto-detects Heroku dyno port via `PORT` and binds the web API automatically.
+- Filesystem is ephemeral on Heroku dynos; queue/session state remains durable through MongoDB.
 
 MTProto uploader backend uses Kurigram (maintained Pyrogram fork).
 

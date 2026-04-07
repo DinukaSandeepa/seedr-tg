@@ -1,0 +1,66 @@
+{
+  "name": "seedr-tg",
+  "description": "Async Seedr.cc to Telegram relay bot with persistent queueing",
+  "repository": "https://github.com/DinukaSandeepa/seedr-tg",
+  "keywords": [
+    "python",
+    "telegram",
+    "seedr",
+    "fastapi",
+    "bot"
+  ],
+  "stack": "heroku-24",
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "env": {
+    "TELEGRAM_BOT_TOKEN": {
+      "description": "Bot token used for intake and admin messaging.",
+      "required": true
+    },
+    "TELEGRAM_API_ID": {
+      "description": "Telegram API ID for the premium uploader account.",
+      "required": true
+    },
+    "TELEGRAM_API_HASH": {
+      "description": "Telegram API hash for the premium uploader account.",
+      "required": true
+    },
+    "TELEGRAM_SOURCE_CHAT_ID": {
+      "description": "Source chat/channel ID that receives magnet links.",
+      "required": true
+    },
+    "TELEGRAM_TARGET_CHAT_ID": {
+      "description": "Destination chat/channel ID for uploaded files.",
+      "required": true
+    },
+    "TELEGRAM_ADMIN_CHAT_ID": {
+      "description": "Private admin chat ID for status and controls.",
+      "required": true
+    },
+    "MONGODB_URI": {
+      "description": "MongoDB connection string used for queue state and auth/session storage.",
+      "required": true
+    },
+    "SEEDR_TOKEN_JSON": {
+      "description": "Optional bootstrap Seedr token JSON; leave blank if using /seedr_auth.",
+      "required": false
+    },
+    "TELEGRAM_USER_SESSION_STRING": {
+      "description": "Optional bootstrap MTProto session; leave blank if using /session_start.",
+      "required": false
+    },
+    "WEB_API_ALLOWED_ORIGINS": {
+      "description": "Comma-separated browser origins allowed to call the web API.",
+      "value": "https://your-frontend.example.com"
+    }
+  }
+}
