@@ -118,54 +118,63 @@ class QueueRunner:
 
     async def run(self) -> None:
         await self._recover_unfinished_jobs()
-        while not self._stop_event.is_set():
-            self._collect_finished_tasks()
-            await self._repository.renumber_queue()
-            available_slots = self._queue_concurrency - len(self._job_tasks)
-            claimed_any = False
-            for _ in range(max(0, available_slots)):
-                claimed = await self._repository.claim_next_queued_job()
-                if claimed is None:
-                    break
-                claimed_any = True
-                task = asyncio.create_task(self._run_job_task(claimed.id), name=f"job-{claimed.id}")
-                self._job_tasks[claimed.id] = task
-
-            if claimed_any:
-                continue
-
-            if self._job_tasks:
-                done, _ = await asyncio.wait(
-                    self._job_tasks.values(),
-                    timeout=self._settings.poll_interval_seconds,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if done:
-                    self._collect_finished_tasks()
-                continue
-
-            job = await self._repository.get_next_job()
-            if job is None:
-                self._wake_event.clear()
-                try:
-                    await asyncio.wait_for(
-                        self._wake_event.wait(),
-                        timeout=self._settings.poll_interval_seconds,
+        try:
+            while not self._stop_event.is_set():
+                self._collect_finished_tasks()
+                await self._repository.renumber_queue()
+                available_slots = self._queue_concurrency - len(self._job_tasks)
+                claimed_any = False
+                for _ in range(max(0, available_slots)):
+                    claimed = await self._repository.claim_next_queued_job()
+                    if claimed is None:
+                        break
+                    claimed_any = True
+                    task = asyncio.create_task(
+                        self._run_job_task(claimed.id),
+                        name=f"job-{claimed.id}",
                     )
-                except TimeoutError:
-                    continue
-                continue
-            await asyncio.sleep(0.05)
+                    self._job_tasks[claimed.id] = task
 
-        for task in self._job_tasks.values():
-            task.cancel()
-        if self._job_tasks:
-            await asyncio.gather(*self._job_tasks.values(), return_exceptions=True)
-        self._job_tasks.clear()
+                if claimed_any:
+                    continue
+
+                if self._job_tasks:
+                    done, _ = await asyncio.wait(
+                        self._job_tasks.values(),
+                        timeout=self._settings.poll_interval_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if done:
+                        self._collect_finished_tasks()
+                    continue
+
+                job = await self._repository.get_next_job()
+                if job is None:
+                    self._wake_event.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self._wake_event.wait(),
+                            timeout=self._settings.poll_interval_seconds,
+                        )
+                    except TimeoutError:
+                        continue
+                    continue
+                await asyncio.sleep(0.05)
+        finally:
+            await self._cancel_active_job_tasks()
 
     async def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
+        await self._cancel_active_job_tasks()
+
+    async def _cancel_active_job_tasks(self) -> None:
+        if not self._job_tasks:
+            return
+        for task in self._job_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self._job_tasks.values(), return_exceptions=True)
+        self._job_tasks.clear()
 
     def _collect_finished_tasks(self) -> None:
         for job_id, task in list(self._job_tasks.items()):
@@ -543,7 +552,7 @@ class QueueRunner:
     @staticmethod
     def _format_failure_reason(exc: Exception) -> str:
         message = str(exc).strip()
-        if isinstance(exc, (SeedrMaxTorrentSizeError, SeedrTrackingLostError)) and message:
+        if isinstance(exc, SeedrMaxTorrentSizeError | SeedrTrackingLostError) and message:
             return message
         if isinstance(exc, APIError) and message.lower() == "api operation failed.":
             return (

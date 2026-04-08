@@ -270,9 +270,13 @@ async def run() -> None:
     finally:
         with contextlib.suppress(Exception):
             await queue_runner.stop()
-        worker_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await worker_task
+        if not worker_task.done():
+            try:
+                await asyncio.wait_for(worker_task, timeout=10.0)
+            except TimeoutError:
+                worker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker_task
         with contextlib.suppress(Exception):
             await web_api.stop()
         with contextlib.suppress(Exception):
