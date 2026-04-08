@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import logging
 import os
 import signal
 import time
@@ -21,6 +22,8 @@ from seedr_tg.telegram.media_rename import TelegramMediaRenameHandler
 from seedr_tg.telegram.uploader import TelegramUploader
 from seedr_tg.web.api import WebApiConfig, WebApiServer
 from seedr_tg.worker.queue_runner import QueueRunner
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_web_api_bind() -> tuple[str, int]:
@@ -265,28 +268,66 @@ async def run() -> None:
     await bot_app.start()
     await web_api.start()
     worker_task = asyncio.create_task(queue_runner.run())
+
+    async def run_shutdown_step(
+        name: str,
+        awaitable,
+        *,
+        timeout_seconds: float,
+        suppress_cancelled: bool = False,
+    ) -> None:
+        try:
+            await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+        except TimeoutError:
+            LOGGER.warning("%s timed out after %.1fs during shutdown", name, timeout_seconds)
+        except asyncio.CancelledError:
+            if suppress_cancelled:
+                return
+            raise
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("%s failed during shutdown: %s", name, exc)
+
+    async def stop_background_services() -> None:
+        labels = (
+            "web API",
+            "bot app",
+            "telegram uploader",
+            "seedr service",
+            "repository",
+        )
+        results = await asyncio.gather(
+            web_api.stop(),
+            bot_app.stop(),
+            uploader.stop(),
+            seedr_service.stop(),
+            repository.close(),
+            return_exceptions=True,
+        )
+        for label, result in zip(labels, results, strict=False):
+            if isinstance(result, Exception):
+                LOGGER.warning("%s stop failed during shutdown: %s", label, result)
+
     try:
         await stop_event.wait()
     finally:
-        with contextlib.suppress(Exception):
-            await queue_runner.stop()
+        await run_shutdown_step(
+            "queue runner stop",
+            queue_runner.stop(),
+            timeout_seconds=8.0,
+        )
         if not worker_task.done():
-            try:
-                await asyncio.wait_for(worker_task, timeout=10.0)
-            except TimeoutError:
-                worker_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await worker_task
-        with contextlib.suppress(Exception):
-            await web_api.stop()
-        with contextlib.suppress(Exception):
-            await bot_app.stop()
-        with contextlib.suppress(Exception):
-            await uploader.stop()
-        with contextlib.suppress(Exception):
-            await seedr_service.stop()
-        with contextlib.suppress(Exception):
-            await repository.close()
+            worker_task.cancel()
+            await run_shutdown_step(
+                "queue runner task cancel",
+                worker_task,
+                timeout_seconds=5.0,
+                suppress_cancelled=True,
+            )
+        await run_shutdown_step(
+            "service stop batch",
+            stop_background_services(),
+            timeout_seconds=12.0,
+        )
 
 
 def main() -> None:

@@ -4,17 +4,16 @@ import asyncio
 import base64
 import contextlib
 import logging
-from pathlib import Path
 import re
 import time
 from collections.abc import Awaitable, Callable
 from html import escape
+from pathlib import Path
 from typing import Literal
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatType
-from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
+from telegram.constants import ChatType, ParseMode
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -188,6 +187,7 @@ class TelegramBotApp:
                 self._handle_user_settings_input,
             )
         )
+        self._application.add_error_handler(self._handle_application_error)
 
     async def start(self) -> None:
         await self._refresh_authorized_chat_ids()
@@ -201,6 +201,154 @@ class TelegramBotApp:
             await updater.stop()
         await self._application.stop()
         await self._application.shutdown()
+
+    @staticmethod
+    def _is_transient_request_error(exc: BaseException) -> bool:
+        if isinstance(exc, BadRequest):
+            return False
+        return isinstance(exc, TimedOut | NetworkError | TimeoutError | OSError)
+
+    async def _handle_application_error(
+        self,
+        update: object,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del update
+        error = context.error
+        if error is None:
+            return
+        if isinstance(error, RetryAfter):
+            LOGGER.warning(
+                "Telegram update handler flood-limited. retry_after=%s",
+                error.retry_after,
+            )
+            return
+        if self._is_transient_request_error(error):
+            LOGGER.warning(
+                "Transient Telegram API failure while processing update: %s",
+                error,
+            )
+            return
+        LOGGER.error(
+            "Unhandled Telegram update error",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    async def _safe_reply_text(
+        self,
+        message,
+        *,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: object | None = None,
+        disable_web_page_preview: bool | None = None,
+        attempts: int = 2,
+    ) -> bool:
+        kwargs: dict[str, object] = {"text": text}
+        if parse_mode is not None:
+            kwargs["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        if disable_web_page_preview is not None:
+            kwargs["disable_web_page_preview"] = disable_web_page_preview
+
+        max_attempts = max(1, int(attempts))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await message.reply_text(**kwargs)
+                return True
+            except RetryAfter as exc:
+                wait_seconds = max(1.0, float(exc.retry_after))
+                LOGGER.warning(
+                    "reply_text flood-limited; retrying in %.2fs",
+                    wait_seconds,
+                )
+                if attempt >= max_attempts:
+                    return False
+                await asyncio.sleep(wait_seconds)
+            except TelegramError as exc:
+                if not self._is_transient_request_error(exc):
+                    LOGGER.warning("reply_text failed: %s", exc)
+                    return False
+                if attempt >= max_attempts:
+                    return False
+                delay = min(2.0, 0.5 * attempt)
+                LOGGER.warning(
+                    "Transient reply_text failure; retrying in %.2fs due to %s",
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+            except (TimeoutError, OSError) as exc:
+                if attempt >= max_attempts:
+                    return False
+                delay = min(2.0, 0.5 * attempt)
+                LOGGER.warning(
+                    "Transient reply_text failure; retrying in %.2fs due to %s",
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+        return False
+
+    async def _safe_edit_message_text(
+        self,
+        query,
+        *,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: object | None = None,
+        disable_web_page_preview: bool | None = None,
+        attempts: int = 2,
+    ) -> bool:
+        kwargs: dict[str, object] = {"text": text}
+        if parse_mode is not None:
+            kwargs["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        if disable_web_page_preview is not None:
+            kwargs["disable_web_page_preview"] = disable_web_page_preview
+
+        max_attempts = max(1, int(attempts))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await query.edit_message_text(**kwargs)
+                return True
+            except RetryAfter as exc:
+                wait_seconds = max(1.0, float(exc.retry_after))
+                LOGGER.warning(
+                    "edit_message_text flood-limited; retrying in %.2fs",
+                    wait_seconds,
+                )
+                if attempt >= max_attempts:
+                    return False
+                await asyncio.sleep(wait_seconds)
+            except TelegramError as exc:
+                if isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower():
+                    return True
+                if not self._is_transient_request_error(exc):
+                    LOGGER.warning("edit_message_text failed: %s", exc)
+                    return False
+                if attempt >= max_attempts:
+                    return False
+                delay = min(2.0, 0.5 * attempt)
+                LOGGER.warning(
+                    "Transient edit_message_text failure; retrying in %.2fs due to %s",
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+            except (TimeoutError, OSError) as exc:
+                if attempt >= max_attempts:
+                    return False
+                delay = min(2.0, 0.5 * attempt)
+                LOGGER.warning(
+                    "Transient edit_message_text failure; retrying in %.2fs due to %s",
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+        return False
 
     async def post_admin_message(
         self,
@@ -1325,10 +1473,12 @@ class TelegramBotApp:
     async def _mysettings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         user = update.effective_user
-        if user is None:
+        message = update.effective_message
+        if user is None or message is None:
             return
         settings = await self._get_user_settings_callback(user.id)
-        await update.message.reply_text(
+        await self._safe_reply_text(
+            message,
             text=self._format_user_settings_text(settings),
             parse_mode=ParseMode.HTML,
             reply_markup=self._user_settings_keyboard(),
@@ -1343,6 +1493,8 @@ class TelegramBotApp:
         query = update.callback_query
         if query is None or query.data is None:
             return
+        if query.message is None:
+            return
         user_id = query.from_user.id
         await query.answer()
 
@@ -1350,9 +1502,12 @@ class TelegramBotApp:
         
         if action == "caption_set":
             self._pending_user_settings_action[user_id] = SETTINGS_ACTION_CAPTION
-            await query.message.reply_text(
-                "Send the custom caption text. Available placeholders:\n"
-                "{filename}, {torrent_name}, {job_id}"
+            await self._safe_reply_text(
+                query.message,
+                text=(
+                    "Send the custom caption text. Available placeholders:\n"
+                    "{filename}, {torrent_name}, {job_id}"
+                ),
             )
             return
         if action == "caption_clear":
@@ -1362,7 +1517,10 @@ class TelegramBotApp:
 
         if action == "thumb_set":
             self._pending_user_settings_action[user_id] = SETTINGS_ACTION_THUMBNAIL
-            await query.message.reply_text("Send the thumbnail as a photo or image document now.")
+            await self._safe_reply_text(
+                query.message,
+                text="Send the thumbnail as a photo or image document now.",
+            )
             return
         if action == "thumb_clear":
             await self._update_user_settings_callback(
@@ -1392,11 +1550,14 @@ class TelegramBotApp:
 
         if pending == SETTINGS_ACTION_CAPTION:
             if not message.text:
-                await message.reply_text("Send caption text as plain message.")
+                await self._safe_reply_text(message, text="Send caption text as plain message.")
                 return True
-            await self._update_user_settings_callback(user_id=user.id, caption_template=message.text.strip())
+            await self._update_user_settings_callback(
+                user_id=user.id,
+                caption_template=message.text.strip(),
+            )
             self._pending_user_settings_action.pop(user.id, None)
-            await message.reply_text("Your custom caption saved.")
+            await self._safe_reply_text(message, text="Your custom caption saved.")
             return True
 
         if pending == SETTINGS_ACTION_THUMBNAIL:
@@ -1410,7 +1571,10 @@ class TelegramBotApp:
                 file_id = image.file_id
             
             if image is None or file_id is None:
-                await message.reply_text("Send a photo or image document for thumbnail.")
+                await self._safe_reply_text(
+                    message,
+                    text="Send a photo or image document for thumbnail.",
+                )
                 return True
 
             telegram_file = await image.get_file()
@@ -1423,13 +1587,14 @@ class TelegramBotApp:
                 thumbnail_base64=thumbnail_base64,
             )
             self._pending_user_settings_action.pop(user.id, None)
-            await message.reply_text("Your custom thumbnail saved.")
+            await self._safe_reply_text(message, text="Your custom thumbnail saved.")
             return True
         return False
 
     async def _refresh_mysettings_message(self, query, user_id: int) -> None:
         settings = await self._get_user_settings_callback(user_id)
-        await query.edit_message_text(
+        await self._safe_edit_message_text(
+            query,
             text=self._format_user_settings_text(settings),
             parse_mode=ParseMode.HTML,
             reply_markup=self._user_settings_keyboard(),

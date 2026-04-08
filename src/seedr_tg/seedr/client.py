@@ -55,6 +55,9 @@ class SeedrService:
         self._client: AsyncSeedr | None = None
         self._http_client: httpx.AsyncClient | None = None
         self._token_lock = asyncio.Lock()
+        self._aria2_binary_path: str | None = None
+        self._aria2_checked = False
+        self._aria2_missing_logged = False
 
     async def start(self) -> None:
         if self._client is not None:
@@ -274,21 +277,32 @@ class SeedrService:
         progress_hook: Any | None = None,
     ) -> None:
         if self._settings.use_aria2_downloads:
-            try:
-                LOGGER.info("Using aria2 downloader for %s", destination.name)
-                await self._download_file_via_aria2(
-                    url,
-                    destination,
-                    progress_hook=progress_hook,
-                )
-                return
-            except (RuntimeError, OSError, ValueError) as exc:
-                self._cleanup_partial_download_artifacts(destination)
-                LOGGER.warning(
-                    "aria2 download failed for %s, falling back to httpx downloader: %s",
-                    destination.name,
-                    exc,
-                )
+            aria2_path = self._resolve_aria2_binary_path()
+            if aria2_path is None:
+                if not self._aria2_missing_logged:
+                    aria2_binary = self._settings.aria2_binary.strip() or "aria2c"
+                    LOGGER.warning(
+                        "aria2 binary '%s' is not available in PATH; using built-in httpx downloader",
+                        aria2_binary,
+                    )
+                    self._aria2_missing_logged = True
+            else:
+                try:
+                    LOGGER.info("Using aria2 downloader for %s", destination.name)
+                    await self._download_file_via_aria2(
+                        url,
+                        destination,
+                        progress_hook=progress_hook,
+                        aria2_path=aria2_path,
+                    )
+                    return
+                except (RuntimeError, OSError, ValueError) as exc:
+                    self._cleanup_partial_download_artifacts(destination)
+                    LOGGER.warning(
+                        "aria2 download failed for %s, falling back to httpx downloader: %s",
+                        destination.name,
+                        exc,
+                    )
         else:
             LOGGER.info("Using built-in httpx downloader for %s", destination.name)
 
@@ -350,13 +364,10 @@ class SeedrService:
         self,
         url: str,
         destination: Path,
+        *,
+        aria2_path: str,
         progress_hook: Any | None = None,
     ) -> None:
-        aria2_binary = self._settings.aria2_binary.strip() or "aria2c"
-        aria2_path = shutil.which(aria2_binary)
-        if aria2_path is None:
-            raise RuntimeError(f"aria2 binary '{aria2_binary}' is not available in PATH")
-
         destination.parent.mkdir(parents=True, exist_ok=True)
         total_bytes = await self._probe_remote_size(url)
         if progress_hook is not None:
@@ -463,6 +474,14 @@ class SeedrService:
         except (httpx.HTTPError, ValueError):
             return 0
         return 0
+
+    def _resolve_aria2_binary_path(self) -> str | None:
+        if self._aria2_checked:
+            return self._aria2_binary_path
+        aria2_binary = self._settings.aria2_binary.strip() or "aria2c"
+        self._aria2_binary_path = shutil.which(aria2_binary)
+        self._aria2_checked = True
+        return self._aria2_binary_path
 
     @staticmethod
     def _is_retryable_download_error(exc: BaseException) -> bool:

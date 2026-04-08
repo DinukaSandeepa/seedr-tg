@@ -26,6 +26,8 @@ from seedr_tg.worker.downloads import LocalDownloader
 
 LOGGER = logging.getLogger(__name__)
 _ALLOWED_UPLOAD_EXTENSIONS = {".mp4", ".mkv", ".zip"}
+_STOP_CANCEL_TIMEOUT_SECONDS = 8.0
+_RUNNER_CANCEL_TIMEOUT_SECONDS = 6.0
 
 
 class QueueRunner:
@@ -161,20 +163,38 @@ class QueueRunner:
                     continue
                 await asyncio.sleep(0.05)
         finally:
-            await self._cancel_active_job_tasks()
+            await self._cancel_active_job_tasks(
+                timeout_seconds=_RUNNER_CANCEL_TIMEOUT_SECONDS,
+            )
 
     async def stop(self) -> None:
         self._stop_event.set()
         self._wake_event.set()
-        await self._cancel_active_job_tasks()
+        await self._cancel_active_job_tasks(timeout_seconds=_STOP_CANCEL_TIMEOUT_SECONDS)
 
-    async def _cancel_active_job_tasks(self) -> None:
+    async def _cancel_active_job_tasks(self, *, timeout_seconds: float | None = None) -> None:
         if not self._job_tasks:
             return
-        for task in self._job_tasks.values():
+        tasks = list(self._job_tasks.values())
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*self._job_tasks.values(), return_exceptions=True)
-        self._job_tasks.clear()
+        waiter = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            if timeout_seconds is None:
+                await waiter
+            else:
+                await asyncio.wait_for(waiter, timeout=timeout_seconds)
+        except TimeoutError:
+            pending_count = sum(1 for task in tasks if not task.done())
+            LOGGER.warning(
+                "Queue runner cancellation timed out; pending_tasks=%s timeout=%.1fs",
+                pending_count,
+                timeout_seconds,
+            )
+        finally:
+            for job_id, task in list(self._job_tasks.items()):
+                if task.done():
+                    self._job_tasks.pop(job_id, None)
 
     def _collect_finished_tasks(self) -> None:
         for job_id, task in list(self._job_tasks.items()):
