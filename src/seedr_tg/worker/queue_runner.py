@@ -7,7 +7,7 @@ import shutil
 import time
 from pathlib import Path
 
-from seedrcc.exceptions import APIError
+from seedrcc.exceptions import APIError, ServerError
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 
 from seedr_tg.config import Settings
@@ -205,9 +205,19 @@ class QueueRunner:
                 exc = task.exception()
                 if exc is not None:
                     LOGGER.exception("Job %s failed", job_id, exc_info=exc)
-                    asyncio.create_task(
+                    mark_task = asyncio.create_task(
                         self._mark_failed(job_id, self._format_failure_reason(exc))
                     )
+                    mark_task.add_done_callback(self._handle_mark_failed_done)
+
+    @staticmethod
+    def _handle_mark_failed_done(task: asyncio.Task[None]) -> None:
+        """Log any unhandled exception from background _mark_failed tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            LOGGER.error("_mark_failed background task raised: %s", exc, exc_info=exc)
 
     async def _run_job_task(self, job_id: int) -> None:
         try:
@@ -363,6 +373,10 @@ class QueueRunner:
             current_step="Cleaning local files",
         )
         await self._sync_admin_message(job)
+        # Capture file sizes BEFORE deleting, for outcome reporting.
+        fallback_size_bytes = sum(
+            path.stat().st_size for path in upload_file_paths if path.exists()
+        )
         await asyncio.to_thread(shutil.rmtree, local_root, True)
 
         job = await self._transition(
@@ -378,9 +392,7 @@ class QueueRunner:
             job,
             mode_tags="#Leech | #seedr",
             file_names=[path.name for path in upload_file_paths],
-            fallback_size_bytes=sum(
-                path.stat().st_size for path in upload_file_paths if path.exists()
-            ),
+            fallback_size_bytes=fallback_size_bytes,
         )
         await self._repository.renumber_queue()
 
@@ -574,14 +586,54 @@ class QueueRunner:
         message = str(exc).strip()
         if isinstance(exc, SeedrMaxTorrentSizeError | SeedrTrackingLostError) and message:
             return message
-        if isinstance(exc, APIError) and message.lower() in {
-            "api operation failed.",
-            "api request failed.",
-        }:
-            return (
-                "Seedr API rejected this task. Common causes: source exceeds 4GB, "
-                "invalid/dead magnet, or Seedr account/storage limits."
-            )
+        if isinstance(exc, (APIError, ServerError)):
+            # Try to extract detailed info from the response.
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            api_code = getattr(exc, "code", None)
+            error_type = getattr(exc, "error_type", None)
+            # Build a more informative message from API response fields.
+            details: list[str] = []
+            if status_code is not None:
+                details.append(f"HTTP {status_code}")
+            if isinstance(api_code, int) and api_code:
+                details.append(f"code={api_code}")
+            if isinstance(error_type, str) and error_type:
+                details.append(f"type={error_type}")
+            # Extract error text from response body.
+            body_error: str | None = None
+            if response is not None:
+                with contextlib.suppress(Exception):
+                    body_data = response.json()
+                    if isinstance(body_data, dict):
+                        body_error = body_data.get("error") or body_data.get("message")
+            if body_error and body_error.strip().lower() not in {
+                "api request failed.",
+                "api operation failed.",
+            }:
+                details.append(body_error.strip())
+            if details:
+                detail_str = " | ".join(details)
+                if message.lower() in {
+                    "api request failed.",
+                    "api operation failed.",
+                    "a server error occurred.",
+                }:
+                    return (
+                        f"Seedr API error ({detail_str}). Common causes: "
+                        "source exceeds 4GB, invalid/dead magnet, or "
+                        "Seedr account/storage limits."
+                    )
+                return f"{message} ({detail_str})"
+            # Fallback for generic messages.
+            if message.lower() in {
+                "api request failed.",
+                "api operation failed.",
+            }:
+                return (
+                    "Seedr API rejected this task. Common causes: source exceeds 4GB, "
+                    "invalid/dead magnet, or Seedr account/storage limits."
+                )
         if message:
             return message
         cause = exc.__cause__
@@ -648,6 +700,7 @@ class QueueRunner:
                 for key, value in self._last_progress_sync_at.items()
                 if key[0] != job_id
             }
+            self._cancel_processed_jobs.discard(job_id)
         return job
 
     async def _cleanup_seedr_artifacts(self, job: JobRecord) -> None:
