@@ -14,6 +14,7 @@ import aiofiles
 import httpx
 from seedrcc import AsyncSeedr, Token
 from seedrcc.exceptions import APIError, ServerError
+from seedrcc.models import AddTorrentResult
 from seedrcc.models import Folder, Torrent, TorrentProgress
 
 from seedr_tg.config import Settings
@@ -119,6 +120,7 @@ class SeedrService:
         return await self._add_torrent_with_retry(
             label="magnet",
             call=lambda client: client.add_torrent(magnet_link=magnet_link),
+            magnet_link=magnet_link,
         )
 
     async def add_torrent_file(self, torrent_file_path: Path | str) -> int | None:
@@ -128,12 +130,15 @@ class SeedrService:
         return await self._add_torrent_with_retry(
             label="torrent_file",
             call=lambda client: client.add_torrent(torrent_file=str(file_path)),
+            torrent_file_path=file_path,
         )
 
     async def _add_torrent_with_retry(
         self,
         label: str,
         call: Callable[[AsyncSeedr], Awaitable[Any]],
+        magnet_link: str | None = None,
+        torrent_file_path: Path | None = None,
     ) -> int | None:
         """Shared retry logic for add_magnet and add_torrent_file."""
         client = await self._get_client()
@@ -148,6 +153,27 @@ class SeedrService:
                     "Seedr accepts torrents/magnets up to 4GB only. "
                     "Please use a source <= 4GB."
                 ) from exc
+
+            if (
+                isinstance(exc, APIError)
+                and self._is_add_torrent_endpoint_not_found(exc)
+                and (magnet_link is not None or torrent_file_path is not None)
+            ):
+                LOGGER.warning(
+                    "Seedr add_torrent(%s) returned 404. Retrying with form-body fallback.",
+                    label,
+                )
+                fallback_torrent_id = await self._add_torrent_via_form_body_fallback(
+                    client,
+                    magnet_link=magnet_link,
+                    torrent_file_path=torrent_file_path,
+                )
+                if fallback_torrent_id is not None:
+                    LOGGER.info(
+                        "Seedr add_torrent(%s) succeeded via form-body fallback",
+                        label,
+                    )
+                    return fallback_torrent_id
 
             if self._is_storage_related_api_error(exc):
                 LOGGER.warning(
@@ -226,6 +252,67 @@ class SeedrService:
                     if not self._is_retryable_add_torrent_error(retry_exc):
                         break
             raise
+
+    async def _add_torrent_via_form_body_fallback(
+        self,
+        client: AsyncSeedr,
+        *,
+        magnet_link: str | None,
+        torrent_file_path: Path | None,
+    ) -> int | None:
+        token = client.token.access_token
+        if not token:
+            return None
+
+        payload: dict[str, str] = {
+            "access_token": token,
+            "func": "add_torrent",
+        }
+        if magnet_link is not None:
+            payload["torrent_magnet"] = magnet_link
+
+        files: dict[str, tuple[str, bytes, str]] | None = None
+        if torrent_file_path is not None:
+            content = await asyncio.to_thread(torrent_file_path.read_bytes)
+            files = {
+                "torrent_file": (
+                    torrent_file_path.name,
+                    content,
+                    "application/x-bittorrent",
+                )
+            }
+
+        http_client = self._http_client
+        created_client = False
+        if http_client is None:
+            http_client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+            created_client = True
+
+        try:
+            response = await http_client.post(
+                "https://www.seedr.cc/oauth_test/resource.php",
+                data=payload,
+                files=files,
+            )
+            if response.status_code >= 400:
+                raise APIError("API request failed.", response=response)
+            data = response.json()
+            if isinstance(data, dict) and data.get("result", True) is not True:
+                raise APIError("API operation failed.", response=response)
+            result = AddTorrentResult.from_dict(data)
+            return result.user_torrent_id
+        finally:
+            if created_client:
+                await http_client.aclose()
+
+    @staticmethod
+    def _is_add_torrent_endpoint_not_found(exc: APIError) -> bool:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code != 404:
+            return False
+        payload = SeedrService._api_error_text(exc)
+        return "not found" in payload or "404" in payload
 
     async def resolve_torrent(
         self,

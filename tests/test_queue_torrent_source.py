@@ -202,6 +202,70 @@ def test_retryable_add_torrent_error_rejects_generic_400_api_request_failed():
 
 
 @pytest.mark.asyncio
+async def test_add_magnet_uses_form_body_fallback_on_404():
+    service = SeedrService.__new__(SeedrService)
+
+    request = httpx.Request("POST", "https://example.com/oauth_test/resource.php")
+    not_found_error = APIError(
+        "API request failed.",
+        response=httpx.Response(
+            404,
+            request=request,
+            text='{"status_code":404,"reason_phrase":"Not Found"}',
+        ),
+    )
+
+    class _SeedrClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.token = SimpleNamespace(access_token="token-123")
+
+        async def add_torrent(self, **_kwargs):
+            self.calls += 1
+            raise not_found_error
+
+    class _HttpClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_data = None
+            self.last_files = None
+
+        async def post(self, _url: str, data=None, files=None):
+            self.calls += 1
+            self.last_data = data
+            self.last_files = files
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", "https://www.seedr.cc/oauth_test/resource.php"),
+                json={"result": True, "user_torrent_id": 999},
+            )
+
+    fake_seedr_client = _SeedrClient()
+    fake_http_client = _HttpClient()
+
+    async def fake_get_client():
+        return fake_seedr_client
+
+    async def fake_cleanup_seedr_storage(*, _exclude_active_jobs: bool):
+        return 0
+
+    object.__setattr__(service, "_get_client", fake_get_client)
+    object.__setattr__(service, "_cleanup_seedr_storage", fake_cleanup_seedr_storage)
+    object.__setattr__(service, "_http_client", fake_http_client)
+    object.__setattr__(service, "_ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS", (0.0,))
+
+    torrent_id = await service.add_magnet("magnet:?xt=urn:btih:fallback")
+
+    assert torrent_id == 999
+    assert fake_seedr_client.calls == 1
+    assert fake_http_client.calls == 1
+    assert fake_http_client.last_data["access_token"] == "token-123"
+    assert fake_http_client.last_data["func"] == "add_torrent"
+    assert fake_http_client.last_data["torrent_magnet"] == "magnet:?xt=urn:btih:fallback"
+    assert fake_http_client.last_files is None
+
+
+@pytest.mark.asyncio
 async def test_process_job_preserves_known_folder_id_for_download_and_cleanup(tmp_path):
     runner = QueueRunner.__new__(QueueRunner)
 
