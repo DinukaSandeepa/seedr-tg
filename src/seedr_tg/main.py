@@ -21,6 +21,7 @@ from seedr_tg.telegram.bot_app import TelegramBotApp
 from seedr_tg.telegram.media_rename import TelegramMediaRenameHandler
 from seedr_tg.telegram.uploader import TelegramUploader
 from seedr_tg.web.api import WebApiConfig, WebApiServer
+from seedr_tg.web.keepalive import KeepalivePinger
 from seedr_tg.worker.queue_runner import QueueRunner
 
 LOGGER = logging.getLogger(__name__)
@@ -255,6 +256,12 @@ async def run() -> None:
             allowed_origins=settings.web_api_allowed_origins,
         ),
     )
+    keepalive_pinger = KeepalivePinger(
+        base_url=settings.keepalive_base_url,
+        path=settings.keepalive_path,
+        interval_seconds=settings.keepalive_interval_seconds,
+        timeout_seconds=settings.keepalive_timeout_seconds,
+    )
 
     stop_event = asyncio.Event()
 
@@ -267,6 +274,7 @@ async def run() -> None:
 
     await bot_app.start()
     await web_api.start()
+    await keepalive_pinger.start()
     worker_task = asyncio.create_task(queue_runner.run())
 
     async def run_shutdown_step(
@@ -289,6 +297,7 @@ async def run() -> None:
 
     async def stop_background_services() -> None:
         labels = (
+            "keepalive pinger",
             "web API",
             "bot app",
             "telegram uploader",
@@ -296,6 +305,7 @@ async def run() -> None:
             "repository",
         )
         results = await asyncio.gather(
+            keepalive_pinger.stop(),
             web_api.stop(),
             bot_app.stop(),
             uploader.stop(),

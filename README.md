@@ -30,6 +30,10 @@ Copy `.env.example` to `.env` and fill these values:
 - `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
 - `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
 - `WEB_API_ALLOWED_ORIGINS`: Comma-separated list of browser origins allowed to call the web API (for example your Vercel frontend URL).
+- `KEEPALIVE_BASE_URL`: Optional public app base URL to keep awake (for example `https://your-app-name.herokuapp.com`).
+- `KEEPALIVE_PATH`: Optional keepalive path appended to the base URL (default `/api/health`).
+- `KEEPALIVE_INTERVAL_SECONDS`: Optional keepalive ping interval in seconds (default `240`).
+- `KEEPALIVE_TIMEOUT_SECONDS`: Optional keepalive request timeout in seconds (default `10`).
 - `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
 - `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
 
@@ -51,6 +55,7 @@ Notes:
 
 - The app auto-detects Heroku dyno port via `PORT` and binds the web API automatically.
 - Filesystem is ephemeral on Heroku dynos; queue/session state remains durable through MongoDB.
+- To reduce idle sleeping, set `KEEPALIVE_BASE_URL` to your Heroku app URL. The app will periodically ping its own health endpoint.
 
 MTProto uploader backend uses Kurigram (maintained Pyrogram fork).
 

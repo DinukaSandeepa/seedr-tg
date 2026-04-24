@@ -27,6 +27,16 @@ class Settings(BaseSettings):
         default="http://localhost:3000,http://127.0.0.1:3000,https://seedr-tg.vercel.app",
         alias="WEB_API_ALLOWED_ORIGINS",
     )
+    keepalive_base_url: str | None = Field(default=None, alias="KEEPALIVE_BASE_URL")
+    keepalive_path: str = Field(default="/api/health", alias="KEEPALIVE_PATH")
+    keepalive_interval_seconds: float = Field(
+        default=240.0,
+        alias="KEEPALIVE_INTERVAL_SECONDS",
+    )
+    keepalive_timeout_seconds: float = Field(
+        default=10.0,
+        alias="KEEPALIVE_TIMEOUT_SECONDS",
+    )
     download_root: Path = Path("downloads")
     max_seedr_file_size_bytes: int = 4 * 1024 * 1024 * 1024
     poll_interval_seconds: float = 10.0
