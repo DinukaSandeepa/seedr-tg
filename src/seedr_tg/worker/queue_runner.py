@@ -574,7 +574,10 @@ class QueueRunner:
         message = str(exc).strip()
         if isinstance(exc, SeedrMaxTorrentSizeError | SeedrTrackingLostError) and message:
             return message
-        if isinstance(exc, APIError) and message.lower() == "api operation failed.":
+        if isinstance(exc, APIError) and message.lower() in {
+            "api operation failed.",
+            "api request failed.",
+        }:
             return (
                 "Seedr API rejected this task. Common causes: source exceeds 4GB, "
                 "invalid/dead magnet, or Seedr account/storage limits."

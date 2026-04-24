@@ -4,7 +4,9 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from seedrcc.exceptions import APIError
 
 from seedr_tg.db.models import JobPhase
 from seedr_tg.seedr.client import SeedrMaxTorrentSizeError, SeedrService
@@ -83,6 +85,13 @@ def test_format_failure_reason_returns_plain_seedr_tracking_lost_reason():
     assert reason.startswith("Seedr stopped tracking this torrent")
 
 
+def test_format_failure_reason_maps_api_request_failed_to_seedr_hint():
+    format_reason = getattr(QueueRunner, "_format_failure_reason")
+    reason = format_reason(APIError("API request failed."))
+
+    assert reason.startswith("Seedr API rejected this task")
+
+
 def test_format_failure_reason_uses_plain_runtime_message_without_prefix():
     format_reason = getattr(QueueRunner, "_format_failure_reason")
     reason = format_reason(RuntimeError("Something failed clearly"))
@@ -101,6 +110,47 @@ async def test_ensure_under_limit_raises_human_readable_4gb_warning():
 
     with pytest.raises(SeedrMaxTorrentSizeError, match="up to 4GB only"):
         await service.ensure_under_limit((4 * 1024 * 1024 * 1024) + 1)
+
+
+@pytest.mark.asyncio
+async def test_add_torrent_file_retries_once_for_transient_api_error(tmp_path):
+    service = SeedrService.__new__(SeedrService)
+
+    torrent_file = tmp_path / "transient.torrent"
+    torrent_file.write_bytes(b"d4:infod4:name4:teste")
+
+    request = httpx.Request("POST", "https://example.com/rest/transfer/file")
+    transient_error = APIError(
+        "API request failed.",
+        response=httpx.Response(429, request=request, text="Too many requests"),
+    )
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def add_torrent(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise transient_error
+            return SimpleNamespace(user_torrent_id=333)
+
+    fake_client = _Client()
+
+    async def fake_get_client():
+        return fake_client
+
+    async def fake_cleanup_seedr_storage(*, _exclude_active_jobs: bool):
+        return 0
+
+    object.__setattr__(service, "_get_client", fake_get_client)
+    object.__setattr__(service, "_cleanup_seedr_storage", fake_cleanup_seedr_storage)
+    object.__setattr__(service, "_ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS", (0.0,))
+
+    torrent_id = await service.add_torrent_file(torrent_file)
+
+    assert torrent_id == 333
+    assert fake_client.calls == 2
 
 
 @pytest.mark.asyncio

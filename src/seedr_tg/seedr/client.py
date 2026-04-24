@@ -48,6 +48,7 @@ class SeedrMaxTorrentSizeError(ValueError):
 
 class SeedrService:
     _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+    _ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS = (1.2,)
 
     def __init__(self, settings: Settings, repository: JobRepository) -> None:
         self._settings = settings
@@ -123,29 +124,58 @@ class SeedrService:
                 raise SeedrMaxTorrentSizeError(
                     "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
                 ) from exc
-            if not self._is_storage_related_api_error(exc):
-                raise
-            LOGGER.warning(
-                (
-                    "Seedr add_torrent failed due to storage/quota limit. "
-                    "Attempting automatic cleanup before retry. error=%s"
-                ),
-                exc,
-            )
-            deleted_count = await self._cleanup_seedr_storage(exclude_active_jobs=True)
-            if deleted_count <= 0:
+            if self._is_storage_related_api_error(exc):
                 LOGGER.warning(
-                    "Seedr cleanup did not remove removable artifacts; "
-                    "add_torrent retry skipped"
+                    (
+                        "Seedr add_torrent failed due to storage/quota limit. "
+                        "Attempting automatic cleanup before retry. error=%s"
+                    ),
+                    exc,
                 )
+                deleted_count = await self._cleanup_seedr_storage(exclude_active_jobs=True)
+                if deleted_count <= 0:
+                    LOGGER.warning(
+                        "Seedr cleanup did not remove removable artifacts; "
+                        "add_torrent retry skipped"
+                    )
+                    raise
+                await asyncio.sleep(0.6)
+                try:
+                    result = await client.add_torrent(magnet_link=magnet_link)
+                    LOGGER.info(
+                        "Seedr add_torrent succeeded after cleanup retry; removed_items=%s",
+                        deleted_count,
+                    )
+                    return result.user_torrent_id
+                except APIError as retry_exc:
+                    if self._is_torrent_size_limit_error(retry_exc):
+                        raise SeedrMaxTorrentSizeError(
+                            "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+                        ) from retry_exc
+                    exc = retry_exc
+
+            if not self._is_retryable_add_torrent_error(exc):
                 raise
-            await asyncio.sleep(0.6)
-            result = await client.add_torrent(magnet_link=magnet_link)
-            LOGGER.info(
-                "Seedr add_torrent succeeded after cleanup retry; removed_items=%s",
-                deleted_count,
-            )
-            return result.user_torrent_id
+            for delay in self._ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS:
+                LOGGER.warning(
+                    "Seedr add_torrent(magnet) transient failure; retrying in %.1fs. error=%s",
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+                try:
+                    result = await client.add_torrent(magnet_link=magnet_link)
+                    LOGGER.info("Seedr add_torrent(magnet) recovered after transient retry")
+                    return result.user_torrent_id
+                except APIError as retry_exc:
+                    if self._is_torrent_size_limit_error(retry_exc):
+                        raise SeedrMaxTorrentSizeError(
+                            "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+                        ) from retry_exc
+                    exc = retry_exc
+                    if not self._is_retryable_add_torrent_error(retry_exc):
+                        break
+            raise
 
     async def add_torrent_file(self, torrent_file_path: Path | str) -> int | None:
         client = await self._get_client()
@@ -160,29 +190,58 @@ class SeedrService:
                 raise SeedrMaxTorrentSizeError(
                     "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
                 ) from exc
-            if not self._is_storage_related_api_error(exc):
-                raise
-            LOGGER.warning(
-                (
-                    "Seedr add_torrent(torrent_file) failed due to storage/quota limit. "
-                    "Attempting automatic cleanup before retry. error=%s"
-                ),
-                exc,
-            )
-            deleted_count = await self._cleanup_seedr_storage(exclude_active_jobs=True)
-            if deleted_count <= 0:
+            if self._is_storage_related_api_error(exc):
                 LOGGER.warning(
-                    "Seedr cleanup did not remove removable artifacts; "
-                    "torrent file add retry skipped"
+                    (
+                        "Seedr add_torrent(torrent_file) failed due to storage/quota limit. "
+                        "Attempting automatic cleanup before retry. error=%s"
+                    ),
+                    exc,
                 )
+                deleted_count = await self._cleanup_seedr_storage(exclude_active_jobs=True)
+                if deleted_count <= 0:
+                    LOGGER.warning(
+                        "Seedr cleanup did not remove removable artifacts; "
+                        "torrent file add retry skipped"
+                    )
+                    raise
+                await asyncio.sleep(0.6)
+                try:
+                    result = await client.add_torrent(torrent_file=str(file_path))
+                    LOGGER.info(
+                        "Seedr add_torrent(torrent_file) succeeded after cleanup retry; removed_items=%s",
+                        deleted_count,
+                    )
+                    return result.user_torrent_id
+                except APIError as retry_exc:
+                    if self._is_torrent_size_limit_error(retry_exc):
+                        raise SeedrMaxTorrentSizeError(
+                            "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+                        ) from retry_exc
+                    exc = retry_exc
+
+            if not self._is_retryable_add_torrent_error(exc):
                 raise
-            await asyncio.sleep(0.6)
-            result = await client.add_torrent(torrent_file=str(file_path))
-            LOGGER.info(
-                "Seedr add_torrent(torrent_file) succeeded after cleanup retry; removed_items=%s",
-                deleted_count,
-            )
-            return result.user_torrent_id
+            for delay in self._ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS:
+                LOGGER.warning(
+                    "Seedr add_torrent(torrent_file) transient failure; retrying in %.1fs. error=%s",
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+                try:
+                    result = await client.add_torrent(torrent_file=str(file_path))
+                    LOGGER.info("Seedr add_torrent(torrent_file) recovered after transient retry")
+                    return result.user_torrent_id
+                except APIError as retry_exc:
+                    if self._is_torrent_size_limit_error(retry_exc):
+                        raise SeedrMaxTorrentSizeError(
+                            "Seedr accepts torrents/magnets up to 4GB only. Please use a source <= 4GB."
+                        ) from retry_exc
+                    exc = retry_exc
+                    if not self._is_retryable_add_torrent_error(retry_exc):
+                        break
+            raise
 
     async def resolve_torrent(
         self,
@@ -581,6 +640,27 @@ class SeedrService:
         return False
 
     @staticmethod
+    def _is_retryable_add_torrent_error(exc: APIError) -> bool:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+            return True
+        payload = SeedrService._api_error_text(exc)
+        return any(
+            token in payload
+            for token in (
+                "api request failed",
+                "timeout",
+                "temporar",
+                "too many",
+                "rate limit",
+                "gateway",
+                "unavailable",
+                "try again",
+            )
+        )
+
+    @staticmethod
     def _is_torrent_size_limit_error(exc: APIError) -> bool:
         payload = SeedrService._api_error_text(exc)
         return (
@@ -591,6 +671,12 @@ class SeedrService:
     @staticmethod
     def _api_error_text(exc: APIError) -> str:
         parts: list[str] = [str(exc)]
+        code = getattr(exc, "code", None)
+        if code is not None:
+            parts.append(str(code))
+        error_type = getattr(exc, "error_type", None)
+        if isinstance(error_type, str) and error_type:
+            parts.append(error_type)
         response = getattr(exc, "response", None)
         if response is not None:
             text = getattr(response, "text", None)
