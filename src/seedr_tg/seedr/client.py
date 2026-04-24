@@ -48,7 +48,7 @@ class SeedrMaxTorrentSizeError(ValueError):
 
 class SeedrService:
     _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
-    _ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS = (1.2,)
+    _ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS = (1.2, 2.5, 5.0)
 
     def __init__(self, settings: Settings, repository: JobRepository) -> None:
         self._settings = settings
@@ -645,11 +645,12 @@ class SeedrService:
         status_code = getattr(response, "status_code", None)
         if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
             return True
+        if isinstance(status_code, int) and 400 <= status_code < 500:
+            return False
         payload = SeedrService._api_error_text(exc)
         return any(
             token in payload
             for token in (
-                "api request failed",
                 "timeout",
                 "temporar",
                 "too many",

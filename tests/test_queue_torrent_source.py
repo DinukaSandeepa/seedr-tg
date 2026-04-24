@@ -154,6 +154,54 @@ async def test_add_torrent_file_retries_once_for_transient_api_error(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_add_magnet_recovers_after_multiple_transient_failures():
+    service = SeedrService.__new__(SeedrService)
+
+    request = httpx.Request("POST", "https://example.com/rest/transfer/magnet")
+    transient_error = APIError(
+        "API request failed.",
+        response=httpx.Response(429, request=request, text="Too many requests"),
+    )
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def add_torrent(self, **_kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise transient_error
+            return SimpleNamespace(user_torrent_id=444)
+
+    fake_client = _Client()
+
+    async def fake_get_client():
+        return fake_client
+
+    async def fake_cleanup_seedr_storage(*, _exclude_active_jobs: bool):
+        return 0
+
+    object.__setattr__(service, "_get_client", fake_get_client)
+    object.__setattr__(service, "_cleanup_seedr_storage", fake_cleanup_seedr_storage)
+    object.__setattr__(service, "_ADD_TORRENT_TRANSIENT_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0))
+
+    torrent_id = await service.add_magnet("magnet:?xt=urn:btih:abc")
+
+    assert torrent_id == 444
+    assert fake_client.calls == 3
+
+
+def test_retryable_add_torrent_error_rejects_generic_400_api_request_failed():
+    request = httpx.Request("POST", "https://example.com/rest/transfer/magnet")
+    error = APIError(
+        "API request failed.",
+        response=httpx.Response(400, request=request, text="Bad request"),
+    )
+
+    assert not SeedrService._is_retryable_add_torrent_error(error)
+
+
+@pytest.mark.asyncio
 async def test_process_job_preserves_known_folder_id_for_download_and_cleanup(tmp_path):
     runner = QueueRunner.__new__(QueueRunner)
 
