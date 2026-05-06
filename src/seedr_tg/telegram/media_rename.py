@@ -19,11 +19,6 @@ from seedr_tg.db.models import JobPhase
 from seedr_tg.db.repository import JobRepository
 from seedr_tg.direct.renamer import FilenameRenamer, RegexSubstitutionRule, RenameRequest
 from seedr_tg.status.outcome import RequesterIdentity, render_task_outcome_message
-from seedr_tg.status.template import (
-    format_speed_bps,
-    readable_size,
-    readable_time,
-)
 from seedr_tg.status.unified import ActiveTaskSnapshot, TaskPhase
 from seedr_tg.telegram.uploader import TelegramUploader
 
@@ -57,6 +52,7 @@ class TelegramMediaRenameHandler:
         is_chat_allowed_callback: Callable[[int], Awaitable[bool]],
         bot_start_time: float,
         max_concurrent_tasks: int = 2,
+        max_upload_concurrency: int = 1,
         register_active_task_callback: (
             Callable[[ActiveTaskSnapshot], Awaitable[None]] | None
         ) = None,
@@ -73,6 +69,7 @@ class TelegramMediaRenameHandler:
         self._is_chat_allowed_callback = is_chat_allowed_callback
         self._bot_start_time = float(bot_start_time)
         self._task_semaphore = asyncio.Semaphore(max(1, int(max_concurrent_tasks)))
+        self._max_upload_concurrency = max(1, int(max_upload_concurrency))
         self._register_active_task_callback = register_active_task_callback
         self._update_active_task_callback = update_active_task_callback
         self._unregister_active_task_callback = unregister_active_task_callback
@@ -138,29 +135,6 @@ class TelegramMediaRenameHandler:
                 return 0.0
             return float(delta_bytes) / delta_time
 
-        def render_transfer_detail(
-            *,
-            phase_label: str,
-            current_bytes: int,
-            total_bytes: int,
-            speed_bps: float,
-            elapsed_seconds: int,
-        ) -> str:
-            processed_line = (
-                f"Processed: {readable_size(current_bytes)} of {readable_size(total_bytes)}"
-                if total_bytes > 0
-                else f"Processed: {readable_size(current_bytes)}"
-            )
-            eta_seconds: int | None = None
-            if total_bytes > current_bytes and speed_bps > 0:
-                eta_seconds = int((total_bytes - current_bytes) / speed_bps)
-            eta_text = readable_time(eta_seconds) if eta_seconds is not None else "-"
-            return (
-                f"{processed_line}\n"
-                f"Status: {phase_label} | ETA: {eta_text}\n"
-                f"Speed: {format_speed_bps(speed_bps)} | Elapsed: {readable_time(elapsed_seconds)}"
-            )
-
         async def update_status(
             *,
             step: str,
@@ -223,7 +197,6 @@ class TelegramMediaRenameHandler:
                     temp_download_path=temp_download_path,
                     speed_samples=speed_samples,
                     measure_speed=measure_speed,
-                    render_transfer_detail=render_transfer_detail,
                     update_status=update_status,
                     ensure_not_canceled=ensure_not_canceled,
                 )
@@ -293,7 +266,6 @@ class TelegramMediaRenameHandler:
         temp_download_path: Path,
         speed_samples: dict[str, tuple[float, int]],
         measure_speed,
-        render_transfer_detail,
         update_status,
         ensure_not_canceled,
     ) -> None:
@@ -462,7 +434,7 @@ class TelegramMediaRenameHandler:
                 caption_prefix="Telegram media rename",
                 upload_settings=upload_settings,
                 user_settings=user_settings,
-                max_concurrent_uploads=1,
+                max_concurrent_uploads=self._max_upload_concurrency,
                 progress_hook=upload_progress_hook,
             )
             await ensure_not_canceled()

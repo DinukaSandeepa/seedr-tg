@@ -234,6 +234,7 @@ async def run() -> None:
         is_chat_allowed_callback=bot_app.is_chat_authorized,
         bot_start_time=bot_start_time,
         max_concurrent_tasks=settings.rename_concurrency,
+        max_upload_concurrency=settings.upload_concurrency,
         register_active_task_callback=bot_app.register_active_task,
         update_active_task_callback=bot_app.update_active_task,
         unregister_active_task_callback=bot_app.unregister_active_task,

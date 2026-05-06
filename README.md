@@ -36,7 +36,11 @@ Copy `.env.example` to `.env` and fill these values:
 - `KEEPALIVE_TIMEOUT_SECONDS`: Optional keepalive request timeout in seconds (default `10`).
 - `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
 - `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
-- `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS`: Optional Kurigram parallel transmission slots per MTProto client (default `4`).
+- `UPLOAD_CONCURRENCY`: Optional concurrent upload workers (default `3`).
+- `UPLOAD_GOVERNOR_ENABLED`: Optional adaptive upload governor toggle (default `true`).
+- `UPLOAD_GOVERNOR_MIN_CONCURRENCY`: Optional governor minimum concurrency floor (default `1`).
+- `UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES`: Optional governor scale-up threshold (default `3`).
+- `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS`: Optional Kurigram parallel transmission slots per MTProto client (default `8`).
 
 ## Heroku One-Click Deploy
 
@@ -276,6 +280,7 @@ Examples:
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.
 - If logs show `TgCrypto is missing`, install dependencies again on your host (`pip install -r requirements.txt`) because missing `tgcrypto` will drastically reduce MTProto speed.
+- For maximum throughput on Heroku, start with `UPLOAD_GOVERNOR_ENABLED=false`, `UPLOAD_CONCURRENCY=4`, and `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS=8`, then tune based on flood-wait behavior.
 
 ## Direct URL Command
 

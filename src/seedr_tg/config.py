@@ -41,15 +41,21 @@ class Settings(BaseSettings):
     max_seedr_file_size_bytes: int = 4 * 1024 * 1024 * 1024
     poll_interval_seconds: float = 10.0
     progress_update_interval_seconds: float = 5.0
-    queue_concurrency: int = 2
-    seedr_active_concurrency: int = 1
-    rename_concurrency: int = 2
-    download_concurrency: int = 4
-    upload_concurrency: int = 3
-    upload_part_size_kb: int = 512
-    upload_governor_enabled: bool = True
-    upload_governor_min_concurrency: int = 1
-    upload_governor_scale_up_after_stable_files: int = 3
+    queue_concurrency: int = Field(default=2, alias="QUEUE_CONCURRENCY")
+    seedr_active_concurrency: int = Field(default=1, alias="SEEDR_ACTIVE_CONCURRENCY")
+    rename_concurrency: int = Field(default=2, alias="RENAME_CONCURRENCY")
+    download_concurrency: int = Field(default=4, alias="DOWNLOAD_CONCURRENCY")
+    upload_concurrency: int = Field(default=3, alias="UPLOAD_CONCURRENCY")
+    upload_part_size_kb: int = Field(default=512, alias="UPLOAD_PART_SIZE_KB")
+    upload_governor_enabled: bool = Field(default=True, alias="UPLOAD_GOVERNOR_ENABLED")
+    upload_governor_min_concurrency: int = Field(
+        default=1,
+        alias="UPLOAD_GOVERNOR_MIN_CONCURRENCY",
+    )
+    upload_governor_scale_up_after_stable_files: int = Field(
+        default=3,
+        alias="UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES",
+    )
     upload_hybrid_mode: bool = True
     upload_split_enabled: bool = True
     upload_split_size_bytes: int = 1_992_294_400
@@ -57,7 +63,7 @@ class Settings(BaseSettings):
     upload_split_ffmpeg_binary: str = "ffmpeg"
     upload_split_ffprobe_binary: str = "ffprobe"
     telegram_max_concurrent_transmissions: int = Field(
-        default=4,
+        default=8,
         alias="TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS",
     )
     use_uvloop: bool = True

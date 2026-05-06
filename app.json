@@ -61,6 +61,26 @@
     "WEB_API_ALLOWED_ORIGINS": {
       "description": "Comma-separated browser origins allowed to call the web API.",
       "value": "https://your-frontend.example.com"
+    },
+    "UPLOAD_CONCURRENCY": {
+      "description": "Concurrent Telegram upload workers.",
+      "value": "3"
+    },
+    "UPLOAD_GOVERNOR_ENABLED": {
+      "description": "Adaptive upload governor; set false for raw max throughput.",
+      "value": "true"
+    },
+    "UPLOAD_GOVERNOR_MIN_CONCURRENCY": {
+      "description": "Minimum upload concurrency when governor is enabled.",
+      "value": "1"
+    },
+    "UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES": {
+      "description": "Stable upload count before governor increases concurrency.",
+      "value": "3"
+    },
+    "TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS": {
+      "description": "Kurigram parallel transfer lanes per MTProto client.",
+      "value": "8"
     }
   }
 }
