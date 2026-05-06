@@ -14,3 +14,4 @@ downloads/
 *.egg-info/
 *.session
 *.session-journal
+/WZML-X

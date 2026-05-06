@@ -19,7 +19,7 @@ Async Seedr.cc to Telegram relay service for a single channel and single Seedr a
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill these values:
+Copy `.env.example` to `.env` and fill only the required secrets/IDs:
 
 - `TELEGRAM_BOT_TOKEN`: Bot token used for intake and admin messaging.
 - `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`: Telegram API credentials for the premium uploader account.
@@ -29,18 +29,8 @@ Copy `.env.example` to `.env` and fill these values:
 - `MONGODB_URI`: MongoDB connection for jobs, auth state, and Telegram user session storage.
 - `SEEDR_TOKEN_JSON`: Optional bootstrap token. If omitted, start device auth from the bot with `/seedr_auth`.
 - `TELEGRAM_USER_SESSION_STRING`: Optional bootstrap MTProto string session. If omitted, create it from the bot with `/session_start <phone>`.
-- `WEB_API_ALLOWED_ORIGINS`: Comma-separated list of browser origins allowed to call the web API (for example your Vercel frontend URL).
-- `KEEPALIVE_BASE_URL`: Optional public app base URL to keep awake (for example `https://your-app-name.herokuapp.com`).
-- `KEEPALIVE_PATH`: Optional keepalive path appended to the base URL (default `/api/health`).
-- `KEEPALIVE_INTERVAL_SECONDS`: Optional keepalive ping interval in seconds (default `240`).
-- `KEEPALIVE_TIMEOUT_SECONDS`: Optional keepalive request timeout in seconds (default `10`).
-- `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
-- `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
-- `UPLOAD_CONCURRENCY`: Optional concurrent upload workers (default `3`).
-- `UPLOAD_GOVERNOR_ENABLED`: Optional adaptive upload governor toggle (default `true`).
-- `UPLOAD_GOVERNOR_MIN_CONCURRENCY`: Optional governor minimum concurrency floor (default `1`).
-- `UPLOAD_GOVERNOR_SCALE_UP_AFTER_STABLE_FILES`: Optional governor scale-up threshold (default `3`).
-- `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS`: Optional Kurigram parallel transmission slots per MTProto client (default `8`).
+
+All other runtime settings are intentionally defaulted in `src/seedr_tg/config.py`, so the env stays minimal like WZML.
 
 ## Heroku One-Click Deploy
 
@@ -63,8 +53,6 @@ Notes:
 - To reduce idle sleeping, set `KEEPALIVE_BASE_URL` to your Heroku app URL. The app will periodically ping its own health endpoint.
 
 MTProto uploader backend uses Kurigram (maintained Pyrogram fork).
-
-All other runtime knobs are now hardcoded defaults in `src/seedr_tg/config.py` to keep `.env` minimal.
 
 Hardcoded upload pipeline values:
 
@@ -280,7 +268,7 @@ Examples:
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.
 - If logs show `TgCrypto is missing`, install dependencies again on your host (`pip install -r requirements.txt`) because missing `tgcrypto` will drastically reduce MTProto speed.
-- For maximum throughput on Heroku, start with `UPLOAD_GOVERNOR_ENABLED=false`, `UPLOAD_CONCURRENCY=4`, and `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS=8`, then tune based on flood-wait behavior.
+- For maximum throughput on Heroku, start with `UPLOAD_GOVERNOR_ENABLED=false`, `UPLOAD_CONCURRENCY=4`, and `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS=100`, then tune based on flood-wait behavior.
 
 ## Direct URL Command
 

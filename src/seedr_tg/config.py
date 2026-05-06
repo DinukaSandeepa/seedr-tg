@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     upload_split_ffmpeg_binary: str = "ffmpeg"
     upload_split_ffprobe_binary: str = "ffprobe"
     telegram_max_concurrent_transmissions: int = Field(
-        default=8,
+        default=100,
         alias="TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS",
     )
     use_uvloop: bool = True

@@ -100,6 +100,7 @@ class TelegramUploader:
     _UPLOAD_SPLIT_FFPROBE_BINARY = "ffprobe"
     _UPLOAD_HYBRID_MODE = True
     _FLOOD_WAIT_SAFETY_MULTIPLIER = 1.08
+    _MTPROTO_SLEEP_THRESHOLD_SECONDS = 60
     _UPLOAD_PROGRESS_EMIT_MIN_INTERVAL_SECONDS = 2.0
     _VIDEO_EXTENSIONS = {
         ".mp4",
@@ -126,7 +127,7 @@ class TelegramUploader:
             "api_hash": self._api_hash,
             "in_memory": in_memory,
             "no_updates": True,
-            "sleep_threshold": 0,
+            "sleep_threshold": self._MTPROTO_SLEEP_THRESHOLD_SECONDS,
             "max_concurrent_transmissions": self._max_concurrent_transmissions,
         }
         if session_string:
@@ -664,7 +665,7 @@ class TelegramUploader:
             bot_token=self._bot_token,
             in_memory=True,
             no_updates=True,
-            sleep_threshold=0,
+            sleep_threshold=self._MTPROTO_SLEEP_THRESHOLD_SECONDS,
             max_concurrent_transmissions=self._max_concurrent_transmissions,
         )
         await client.start()

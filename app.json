@@ -80,7 +80,7 @@
     },
     "TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS": {
       "description": "Kurigram parallel transfer lanes per MTProto client.",
-      "value": "8"
+      "value": "100"
     }
   }
 }
