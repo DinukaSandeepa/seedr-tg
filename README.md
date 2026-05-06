@@ -36,6 +36,7 @@ Copy `.env.example` to `.env` and fill these values:
 - `KEEPALIVE_TIMEOUT_SECONDS`: Optional keepalive request timeout in seconds (default `10`).
 - `DIRECT_DOWNLOAD_CHUNK_SIZE_BYTES`: Optional chunk size for direct URL streaming downloads (default `1048576`).
 - `DIRECT_FILENAME_MAX_BYTES`: Optional max UTF-8 filename byte size for Telegram-safe direct uploads (default `255`).
+- `TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS`: Optional Kurigram parallel transmission slots per MTProto client (default `4`).
 
 ## Heroku One-Click Deploy
 
@@ -274,6 +275,7 @@ Examples:
 - Upload extension filter is enforced: only `.mp4`, `.mkv`, and `.zip` files are uploaded; all other file types are skipped.
 - Raw magnets do not expose total size reliably, so the 4 GB limit is enforced immediately after Seedr resolves metadata.
 - The current implementation is intentionally single-worker FIFO.
+- If logs show `TgCrypto is missing`, install dependencies again on your host (`pip install -r requirements.txt`) because missing `tgcrypto` will drastically reduce MTProto speed.
 
 ## Direct URL Command
 

@@ -127,6 +127,7 @@ class TelegramUploader:
             "in_memory": in_memory,
             "no_updates": True,
             "sleep_threshold": 0,
+            "max_concurrent_transmissions": self._max_concurrent_transmissions,
         }
         if session_string:
             kwargs["session_string"] = session_string
@@ -152,6 +153,7 @@ class TelegramUploader:
         upload_split_use_ffmpeg_for_video: bool | None = None,
         upload_split_ffmpeg_binary: str | None = None,
         upload_split_ffprobe_binary: str | None = None,
+        max_concurrent_transmissions: int | None = None,
     ) -> None:
         self._api_id = api_id
         self._api_hash = api_hash
@@ -217,6 +219,12 @@ class TelegramUploader:
             str(upload_split_ffprobe_binary).strip()
             if upload_split_ffprobe_binary
             else self._UPLOAD_SPLIT_FFPROBE_BINARY
+        )
+        self._max_concurrent_transmissions = max(
+            1,
+            int(max_concurrent_transmissions)
+            if max_concurrent_transmissions is not None
+            else 4,
         )
         self._client: Client | None = None
         self._bot_mtproto_client: Client | None = None
@@ -657,6 +665,7 @@ class TelegramUploader:
             in_memory=True,
             no_updates=True,
             sleep_threshold=0,
+            max_concurrent_transmissions=self._max_concurrent_transmissions,
         )
         await client.start()
         try:
@@ -706,12 +715,19 @@ class TelegramUploader:
         upload_max_retries: int = 4,
     ) -> None:
         total_files = len(file_paths)
+        configured_part_size_kb = max(64, int(upload_part_size_kb))
         requested_upload_concurrency = max(1, int(max_concurrent_uploads))
         min_upload_concurrency = self._upload_governor_min_concurrency
         effective_upload_concurrency = await self._determine_effective_upload_concurrency(
             requested_upload_concurrency=requested_upload_concurrency,
             upload_governor_enabled=self._upload_governor_enabled,
             upload_governor_min_concurrency=min_upload_concurrency,
+        )
+        LOGGER.info(
+            "Starting Telegram upload batch files=%s concurrency=%s part_size_kb=%s",
+            total_files,
+            effective_upload_concurrency,
+            configured_part_size_kb,
         )
         semaphore = asyncio.Semaphore(effective_upload_concurrency)
         progress_lock = asyncio.Lock()

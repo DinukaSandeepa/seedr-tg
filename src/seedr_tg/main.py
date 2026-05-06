@@ -66,6 +66,7 @@ async def run() -> None:
         upload_split_use_ffmpeg_for_video=settings.upload_split_use_ffmpeg_for_video,
         upload_split_ffmpeg_binary=settings.upload_split_ffmpeg_binary,
         upload_split_ffprobe_binary=settings.upload_split_ffprobe_binary,
+        max_concurrent_transmissions=settings.telegram_max_concurrent_transmissions,
     )
     await uploader.start()
 

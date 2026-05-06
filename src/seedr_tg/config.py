@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     upload_split_use_ffmpeg_for_video: bool = True
     upload_split_ffmpeg_binary: str = "ffmpeg"
     upload_split_ffprobe_binary: str = "ffprobe"
+    telegram_max_concurrent_transmissions: int = Field(
+        default=4,
+        alias="TELEGRAM_MAX_CONCURRENT_TRANSMISSIONS",
+    )
     use_uvloop: bool = True
     use_aria2_downloads: bool = True
     aria2_binary: str = "aria2c"
